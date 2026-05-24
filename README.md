@@ -71,7 +71,7 @@ So the goal shifts from `Prevent all access` to:
 - Low-to-mid sophistication commercial cheat frameworks
 
 ### Non-goals
-The architecture does **not** claim to stop:
+The architecture does **not** (yet, but I will figure out a way to) claim to stop:
 - highly resourced hardware-level attackers,
 - DMA-based attacks,
 - nation-state level analysis,
