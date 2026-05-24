@@ -57,12 +57,17 @@ class Entity:
 class EntityRegister:
     def __init__(self):
         self.register = {}
-        self.shared = EntityRegisterStruct()
-        self.shared.magic = 0xA11F
-        self.shared.version = 1
-        self.shared.tick = 0
-        self.shared.epoch = 0
-        self.shared.count = MAX_ENTITIES
+        # Double buffering: two backing structs, active is the one readers see.
+        self.shared_a = EntityRegisterStruct()
+        self.shared_b = EntityRegisterStruct()
+        self.active = self.shared_a
+        self.backup = self.shared_b
+        for shared in (self.shared_a, self.shared_b):
+            shared.magic = 0xA11F
+            shared.version = 1
+            shared.tick = 0
+            shared.epoch = 0
+            shared.count = MAX_ENTITIES
 
     def add(self, entity: Entity):
         self.register[entity.name] = entity
@@ -73,21 +78,30 @@ class EntityRegister:
     def snapshot(self):
         return deepcopy(self.register)
 
-    def sync_shared(self, tick: int, epoch: int):
-        self.shared.tick = tick
-        self.shared.epoch = epoch
+    def _fill_shared(self, shared, tick: int, epoch: int):
+        shared.tick = tick
+        shared.epoch = epoch
         for i, entity in enumerate(self.register.values()):
             if i >= MAX_ENTITIES:
                 break
-            self.shared.entities[i].name = entity.name.encode()[:NAME_LEN-1]
-            self.shared.entities[i].x = entity.x
-            self.shared.entities[i].y = entity.y
+            shared.entities[i].name = entity.name.encode()[:NAME_LEN-1]
+            shared.entities[i].x = entity.x
+            shared.entities[i].y = entity.y
+
+    def sync_shared(self, tick: int, epoch: int):
+        """Write to the currently active buffer (used during init)."""
+        self._fill_shared(self.active, tick, epoch)
+
+    def swap_shared(self, tick: int, epoch: int):
+        """Write updated state into the backup buffer, then swap active/backup."""
+        self._fill_shared(self.backup, tick, epoch)
+        self.active, self.backup = self.backup, self.active
 
     def shared_address(self):
-        return addressof(self.shared)
+        return addressof(self.active)
 
     def shared_size(self):
-        return sizeof(self.shared)
+        return sizeof(self.active)
 
 entityRegister = EntityRegister()
 entityLogger = EntityLogger()
@@ -123,7 +137,8 @@ def gameloop():
                 for entity in entityRegister.access_register().values():
                     entity.setx(randint(0, 9))
                     entity.sety(randint(0, 9))
-                entityRegister.sync_shared(tick, epoch)
+                # Write to backup, then flip — readers always see a consistent active buffer.
+                entityRegister.swap_shared(tick, epoch)
             if tick >= EPOCH_UPDATE_RULE:
                 epoch += 1
                 entityLogger.log(datetime.now().timestamp(), tick, epoch, entityRegister.snapshot())
