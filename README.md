@@ -8,7 +8,7 @@
 
 ## What is AMITF?
 
-AMITF is a research framework aimed at defeating cheating in **Counter-Strike 2** (and similar multiplayer games) through **memory fragmentation**, **encryption epoch rotation**, and **behavioral telemetry** — without relying solely on static signatures or kernel-level enforcement.
+AMITF is a research framework aimed at defeating cheating in **Counter-Strike 2** (and similar multiplayer games) through **memory fragmentation**, **encryption epoch rotation**, and **behavioral telemetry** -- without relying solely on static signatures or kernel-level enforcement.
 
 The core insight is:
 
@@ -53,10 +53,10 @@ AMITF instead assumes:
 
 So the goal shifts from `Prevent all access` to:
 
-- **Reduce semantic coherence** — captured bytes are not reliably meaningful,
-- **Increase synchronization difficulty** — state changes faster than cheats can poll,
-- **Increase maintenance cost** — cheat developers must constantly re-reverse,
-- **Increase telemetry surface** — observation attempts become behavioral signals.
+- **Reduce semantic coherence** -- captured bytes are not reliably meaningful,
+- **Increase synchronization difficulty** -- state changes faster than cheats can poll,
+- **Increase maintenance cost** -- cheat developers must constantly re-reverse,
+- **Increase telemetry surface** -- observation attempts become behavioral signals.
 
 ---
 
@@ -144,11 +144,11 @@ The architecture does **not** claim to stop:
 
 The system is built around five pillars:
 
-1. **Entropy** — increase runtime unpredictability,
-2. **Temporal Instability** — reduce long-term observation reliability,
-3. **Semantic Fragmentation** — prevent externally observed bytes from staying coherent,
-4. **Cost Amplification** — increase engineering burden for cheat maintenance,
-5. **Telemetry-Driven Defense** — use behavior and provenance instead of static signatures.
+1. **Entropy** -- increase runtime unpredictability,
+2. **Temporal Instability** -- reduce long-term observation reliability,
+3. **Semantic Fragmentation** -- prevent externally observed bytes from staying coherent,
+4. **Cost Amplification** -- increase engineering burden for cheat maintenance,
+5. **Telemetry-Driven Defense** -- use behavior and provenance instead of static signatures.
 
 ---
 
