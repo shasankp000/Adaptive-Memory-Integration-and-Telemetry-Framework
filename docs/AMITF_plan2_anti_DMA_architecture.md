@@ -27,9 +27,10 @@ Since a user-space framework cannot use an IOMMU to block a physical PCIe card a
 
 To validate this architecture before moving the development stack to production Rust, use a **Python Orchestrator + C Memory Muscle** hybrid model. This setup allows you to execute raw OS page manipulations directly underneath Python without compromising execution speeds.
 
+```
 [AMITF USER-SPACE LOOP]│
 ▼┌──────────────────────────┐│ 
-1. SEED ENTRY VIA TPM    │ ──► Reads TPM registers natively via OS APIs
+ 1. SEED ENTRY VIA TPM    │ ──► Reads TPM registers natively via OS APIs
  └────────────┬─────────────┘│ 
  (No driver hooks required)
  ▼┌──────────────────────────┐│ 
@@ -39,7 +40,7 @@ To validate this architecture before moving the development stack to production 
  ▼┌──────────────────────────┐│ 
  3. POLYMORPHIC MEMORY    │ ──► Unlocks page -> Writes code -> Flushes cache -> Runs
  └──────────────────────────┘
-
+```
  
 ---
 
