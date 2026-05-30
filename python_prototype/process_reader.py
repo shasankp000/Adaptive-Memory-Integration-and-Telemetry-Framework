@@ -43,7 +43,8 @@ def decode_register(block):
     if len(block) < HEADER_SIZE:
         return None
     magic, version, tick, epoch, count = struct.unpack_from(HEADER_FMT, block, 0)
-    if magic != MAGIC or version != 1 or count != EXPECTED_COUNT:
+    # Naive reader: accept any version, only check magic and count
+    if magic != MAGIC or count != EXPECTED_COUNT:
         return None
     required = HEADER_SIZE + count * ENTITY_SIZE
     if len(block) < required:
@@ -60,7 +61,7 @@ def decode_register(block):
 
 
 def scan_once(target_pid, regions):
-    results   = []
+    results    = []
     block_size = HEADER_SIZE + EXPECTED_COUNT * ENTITY_SIZE
     with open(f'/proc/{target_pid}/mem', 'rb', buffering=0) as mem:
         for start, end, perms in regions:
@@ -91,7 +92,7 @@ def main():
     prev_addresses = set()
     print(f'\nStarting {SCAN_PASSES} scan passes, {SCAN_INTERVAL}s apart...')
     print(f'Scanning rw-p regions only | expected count={EXPECTED_COUNT}')
-    print('NOTE: reader is NAIVE — no knowledge of padding. Expect garbage.\n')
+    print('NOTE: reader is NAIVE — no version check, accepts any version field.\n')
 
     for pass_num in range(1, SCAN_PASSES + 1):
         try:
@@ -115,7 +116,7 @@ def main():
                 tag = '  <-- NEW' if addr in new else ''
                 print(
                     f'[pass {pass_num:02d}] 0x{addr:x} ({perms}){tag}'
-                    f'  tick={reg["tick"]} epoch={reg["epoch"]}'
+                    f'  ver={reg["version"]} tick={reg["tick"]} epoch={reg["epoch"]}'
                     f'  entities: {reg["entities"]}'
                 )
             for old in gone:
