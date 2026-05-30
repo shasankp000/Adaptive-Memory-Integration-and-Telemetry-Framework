@@ -15,8 +15,8 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | **v3** | Decoy structures — fake entity registers with valid magic headers and plausible coordinates | ✅ | ✅ |
 | **v4** | Epoch relocation — move structs to new heap addresses each epoch, invalidate old pointers | ✅ | ✅ |
 | **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ✅ | ✅ |
-| **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ✅ | ⬜ |
-| **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ⬜ | ⬜ |
+| **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ✅ | ✅ |
+| **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ✅ | ⬜ |
 
 ---
 
@@ -34,6 +34,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | v3 reader confirmed poisoned — 6–7 hits/pass, zero real, confidence at noise floor | ✅ |
 | v4 reader confirmed churning — address set unstable every pass, real buffer never found | ✅ |
 | v5 reader confirmed too slow — 30/30 scrubs completed, no real buffer observed | ✅ |
+| v6 telemetry confirmed — 60 hits / 30 epochs, mean delta converged to ~493 ms | ✅ |
 
 ---
 
@@ -132,6 +133,22 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ---
 
+## v6 Validation Notes
+
+- **Telemetry registered 60 hits across 30 epochs, with mean inter-hit delta converging to 493.30 ms.**
+- With `SIMULATE_OBSERVER=0`, the telemetry thread still observed canary mutations because the game
+  rewrites the canary on every epoch swap and the scrub worker destroys it ~50 ms later.
+- The last telemetry events formed a clear paired pattern: one hit at write time, one hit at scrub time
+  roughly **50 ms** later, then a ~950 ms quiet interval before the next epoch pair.
+- Reader behaviour remained degraded exactly as in v5: 5–8 hits/pass, all decoys, garbage, or noise
+  false positives; the real buffer was never decoded.
+- Persistent epoch-0 and garbage survivors still provide a pruning signal for a smarter reader, but no
+  observed candidate yielded stable access to real entity state.
+- **Research question #4 partially answered**: periodic buffer mutation and scrub timing can be measured
+  and fingerprinted as cadence, providing a control-plane signal for adaptive response in v7.
+
+---
+
 ## Broader Phase Roadmap (from `AMITF_intial_plan.md`)
 
 | Phase | Description | Status |
@@ -150,10 +167,10 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 1. How much semantic instability breaks practical reconstruction?
 2. How much entropy before gameplay degradation?
 3. What mutation frequency maximizes instability without correctness cost?
-4. Which telemetry patterns correlate most strongly with polling behaviour?
+4. Which telemetry patterns correlate most strongly with polling behaviour? ✅ **Partially answered** (v6)
 5. How quickly do stale snapshots reduce cheat usefulness? ✅ **Partially answered** (v5)
 6. Can decoy structures reduce reconstruction confidence to noise floor? ✅ **Answered: yes** (v3)
 
 ---
 
-*Last updated: v5 short-lived coherence windows validated. v6 polling telemetry tracking implemented.*
+*Last updated: v6 polling telemetry validated. v7 adaptive semantic poisoning implemented.*
