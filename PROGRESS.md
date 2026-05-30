@@ -17,7 +17,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ✅ | ✅ |
 | **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ✅ | ✅ |
 | **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ✅ | ✅ |
-| **v8** | Smarter reader + anomaly scoring — upgrade reader with heuristic filters, add suspicion score output to prototype | ⬜ | ⬜ |
+| **v8** | Smarter reader + anomaly scoring — upgrade reader with heuristic filters, add suspicion score output to prototype | ✅ | ✅ |
 
 ---
 
@@ -37,6 +37,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | v5 reader confirmed too slow — 30/30 scrubs completed, no real buffer observed | ✅ |
 | v6 telemetry confirmed — 60 hits / 30 epochs, mean delta converged to ~493 ms | ✅ |
 | v7 adaptive poisoning confirmed — poison triggered at epoch 1, decoys 4→12, held for full run | ✅ |
+| v8 smarter reader confirmed — heuristics work on noise but fail to disambiguate real from decoys | ✅ |
 
 ---
 
@@ -172,6 +173,52 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ---
 
+## v8 Validation Notes
+
+### Prototype Output (phase8_prototype.py)
+
+- **TELEMETRY_TOTAL_HITS: 60** across 30 epochs, mean delta converged to **493.30 ms** — consistent with v6/v7.
+- **POISON_ACTIVATIONS: 1** — triggered at epoch 1, decoys held at 12 for full run. Anomaly scoring held [LOW]
+  across all 30 epochs (score plateau at ~0.0833), confirming the suspicion scalar correctly reflects a stable,
+  non-escalating observation cadence.
+- Anomaly score [LOW] plateau at **0.0833** is the expected floor for 2 hits/epoch with low delta variance.
+  Score never escalated to [MEDIUM] or [HIGH] — no observer behaviour aggressive enough to trigger escalation.
+- `delta_var` stabilised at **~203,000 ms²** after epoch 2, reflecting stable ~493 ms polling intervals.
+
+### Reader Output (process_reader_v2.py) — Key Findings
+
+**Noise pruning worked correctly:**
+- Wild-coord candidates (e.g. `0x7fdb71941950`, `0x7fdb71991410`) permanently pinned at **score ≤ −50 [LOW]**
+  via `wild_coords(−30) + epoch_frozen(−40)`. Never rose above noise across all 20 passes.
+- Frozen-epoch penalty (`epoch_frozen(−40)`) correctly neutralised the persistent Python runtime survivor
+  `0x7fdb71926930` (tick=0, epoch=0 across all 20 passes) — max score **+10 [LOW]**.
+
+**Decoy disambiguation failed completely — critical finding:**
+- **19 addresses reached HIGH confidence (score = +75)** by pass 4–8, all scoring
+  `coords_clean(+30) + epoch_inc(+25) + stability(+20)`.
+- The BEST CANDIDATE (`0x7fdb7196e3f0`) was correctly identified in most passes — but it was
+  **indistinguishable from 18 equally-scored HIGH candidates**. Precision = ~1/19 ≈ **5%**.
+- Root cause: v7 semantic poisoning makes all 12 decoys structurally identical to the real register —
+  valid coords, incrementing epochs, stable addresses. All three heuristics are saturated by design.
+- No structural signal (coord range, epoch increment, address stability) survives v7's decoy quality.
+
+**The reader's ceiling is the decoy quality floor:**
+- As long as decoys are well-behaved (valid coords + incrementing epochs + long-lived), the reader
+  cannot disambiguate without accessing the *semantic content* of the payload fields.
+- This confirms the next defensive layer must act at the **content level**, not the structural level.
+
+### Research Question #1 — Now Answered
+
+**Q: How much semantic instability breaks practical reconstruction?**
+
+**A:** Three structural heuristics (coord-range, epoch-increment, address-stability) are insufficient
+when decoys are structurally perfect mimics. The reader achieves ~5% precision — effectively random
+guessing among 19 HIGH-confidence candidates. Real-time cheat use is operationally impossible at
+this precision level, but a patient or ML-assisted reader could theoretically correlate over time.
+The next defensive layer (encryption epoch system) must eliminate content-level leakage to close this.
+
+---
+
 ## v8 Design — Smarter Reader + Anomaly Scoring
 
 v7 closes the offensive prototype arc (v0–v7). v8 pivots to the **defensive measurement arc**:
@@ -224,7 +271,7 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 
 ## Key Open Research Questions
 
-1. How much semantic instability breaks practical reconstruction? 🔄 **Being tested by v8 smarter reader**
+1. How much semantic instability breaks practical reconstruction? ✅ **Answered (v8)** — 3 structural heuristics give ~5% precision at 19 HIGH candidates. Content-level encryption needed to close the gap.
 2. How much entropy before gameplay degradation?
 3. What mutation frequency maximizes instability without correctness cost?
 4. Which telemetry patterns correlate most strongly with polling behaviour? ✅ **Partially answered** (v6)
@@ -233,4 +280,4 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 
 ---
 
-*Last updated: v7 adaptive semantic poisoning validated. v8 smarter reader + anomaly scoring planned.*
+*Last updated: v8 smarter reader validated. Encryption epoch system (v9) next — content-level payload encryption to eliminate semantic leakage from well-behaved decoys.*
