@@ -7,7 +7,9 @@ MAGIC = 0xA11F
 MAGIC_BYTES = struct.pack('<I', MAGIC)
 SCAN_INTERVAL = 0.5   # seconds between each scan pass
 SCAN_PASSES   = 20    # total number of scan passes
-MAX_SANE_COUNT = 64   # sanity cap — real count should be MAX_ENTITIES (2)
+
+# Only accept exactly MAX_ENTITIES (2). Raise this only if you increase MAX_ENTITIES.
+EXPECTED_COUNT = 2
 
 HEADER_FMT  = '<IIIII'
 ENTITY_FMT  = '<8sii'
@@ -26,13 +28,19 @@ class EntityStruct:
 
 
 def parse_maps(maps_text):
+    """
+    Parse /proc/<pid>/maps and return only writable heap/stack regions (rw-p).
+    Skips r--p (read-only file mappings) and r-xp (executable code sections)
+    since ctypes structs allocated on the Python heap will only appear in rw-p.
+    """
     regions = []
     for line in maps_text.splitlines():
         parts = line.split()
         if len(parts) < 2:
             continue
         addr, perms = parts[0], parts[1]
-        if 'r' not in perms:
+        # Only scan private writable regions — heap, stack, anonymous mmap
+        if perms != 'rw-p':
             continue
         start_s, end_s = addr.split('-')
         start = int(start_s, 16)
@@ -44,20 +52,23 @@ def parse_maps(maps_text):
 def decode_register(block):
     """
     Decode a raw bytes block into a register dict.
-    Returns None if the block fails any sanity check
-    (wrong magic, wrong version, insane count, or buffer too small).
+    Returns None if the block fails any sanity check:
+    - wrong magic
+    - wrong version
+    - count != EXPECTED_COUNT (exact match, not a range)
+    - buffer too small for the declared entity count
     """
     if len(block) < HEADER_SIZE:
         return None
 
     magic, version, tick, epoch, count = struct.unpack_from(HEADER_FMT, block, 0)
 
-    # Sanity checks — reject false-positive magic hits
     if magic != MAGIC:
         return None
     if version != 1:
         return None
-    if count == 0 or count > MAX_SANE_COUNT:
+    # Exact count check — eliminates false positives from colliding magic bytes
+    if count != EXPECTED_COUNT:
         return None
 
     required_size = HEADER_SIZE + count * ENTITY_SIZE
@@ -82,9 +93,11 @@ def decode_register(block):
     }
 
 
-def scan_once(target_pid, regions, struct_size):
+def scan_once(target_pid, regions):
     """Scan /proc/<pid>/mem once and return ALL valid matching structs found."""
     results = []
+    block_size = HEADER_SIZE + EXPECTED_COUNT * ENTITY_SIZE
+
     with open(f'/proc/{target_pid}/mem', 'rb', buffering=0) as mem:
         for start, end, perms in regions:
             try:
@@ -99,10 +112,7 @@ def scan_once(target_pid, regions, struct_size):
                 if idx == -1:
                     break
 
-                # Slice generously: header + up to MAX_SANE_COUNT entities
-                max_block = HEADER_SIZE + MAX_SANE_COUNT * ENTITY_SIZE
-                block = chunk[idx:idx + max_block]
-
+                block = chunk[idx:idx + block_size]
                 reg = decode_register(block)
                 if reg is not None:
                     results.append((start + idx, perms, reg))
@@ -121,9 +131,8 @@ def main():
 
     prev_addresses = set()
 
-    print(f"\nStarting {SCAN_PASSES} scan passes, {SCAN_INTERVAL}s apart...\n")
-
-    struct_size = HEADER_SIZE + 2 * ENTITY_SIZE  # expected size for MAX_ENTITIES=2
+    print(f"\nStarting {SCAN_PASSES} scan passes, {SCAN_INTERVAL}s apart...")
+    print(f"Scanning only rw-p regions | expected count={EXPECTED_COUNT}\n")
 
     for pass_num in range(1, SCAN_PASSES + 1):
         try:
@@ -134,7 +143,7 @@ def main():
             break
 
         regions = parse_maps(target_maps)
-        results = scan_once(target_pid, regions, struct_size)
+        results = scan_once(target_pid, regions)
 
         if not results:
             print(f"[pass {pass_num:02d}] No valid struct found.")
