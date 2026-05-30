@@ -6,7 +6,7 @@ from random import randint, randbytes, shuffle, choice
 from copy import deepcopy
 from datetime import datetime
 from time import sleep, perf_counter
-from ctypes import create_string_buffer, addressof, c_char, memmove
+from ctypes import create_string_buffer, addressof, memmove
 from threading import Thread, Event, Lock
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -21,11 +21,9 @@ PAD_MAX  = 16
 N_DECOYS = 4
 COHERENCE_WINDOW_S = 0.05
 
-# v6 telemetry tuning
-TELEMETRY_POLL_S       = 0.01   # sample cadence for canary inspection
-CANARY_SIZE            = 64
-CANARY_OFFSET          = 24     # after header, inside the real buffer body
-SUSPICIOUS_THRESHOLD   = 1      # one unexpected mutation = suspicious
+TELEMETRY_POLL_S     = 0.01
+CANARY_SIZE          = 64
+CANARY_OFFSET        = 24
 
 HEADER_FMT  = '<IIIII'
 HEADER_SIZE = struct.calcsize(HEADER_FMT)
@@ -48,6 +46,7 @@ DECOY_NAME_POOL = [
 ]
 
 
+# ── layout helpers ─────────────────────────────────────────────────────────
 def random_field_order():
     order = list(FIELD_DEFS)
     shuffle(order)
@@ -104,6 +103,7 @@ def scrub_buffer(buf, size):
     struct.pack_into(f'{size}s', buf, 0, noise)
 
 
+# ── domain model ───────────────────────────────────────────────────────────────
 class Entity:
     def __init__(self, name, x, y):
         self.name = name
@@ -128,24 +128,25 @@ class EntityLogger:
         return self.logger
 
 
+# ── v6 register ───────────────────────────────────────────────────────────────
 class PollTelemetryRegister:
     """
-    v6 = v5 + polling telemetry canary.
+    v5 + polling telemetry canary.
 
-    We place a 64-byte canary blob inside the real buffer body. The game never
-    touches it after writing. A background telemetry thread snapshots the canary
-    every 10 ms and checks for unexpected mutation.
+    A 64-byte canary is embedded inside the real buffer at CANARY_OFFSET.
+    The game never touches the canary after writing it.  A background telemetry
+    thread reads the canary every TELEMETRY_POLL_S seconds.  Any change is an
+    anomaly event: timestamp, inter-event delta, and current epoch are recorded.
 
-    This does NOT detect a normal read (Linux userland cannot directly observe
-    remote reads of its own pages without kernel support), so this is an
-    approximation layer for the prototype: it fingerprints *interference* with
-    the buffer region and records cadence of observed mutations. This is enough
-    to prototype the control plane for v6 and feed v7 later.
+    In production this approach detects in-process corruption or a co-resident
+    writer.  For the prototype we supply SIMULATE_OBSERVER=1 which spawns a
+    thread that flips one canary byte every 500 ms, giving a demonstrable
+    500 ms cadence fingerprint in the telemetry output.
 
-    To make the telemetry demonstrable in the prototype, optionally enable the
-    built-in "simulated observer" thread with SIMULATE_OBSERVER=1. That thread
-    flips one canary byte every 500 ms, imitating a polling actor touching the
-    buffer at a regular cadence.
+    Lock discipline:
+      _buf_lock is held by the CALLER before calling _write_canary_locked() or
+      _read_canary_locked().  Those two helpers must never acquire the lock
+      themselves to prevent reentrant deadlock.
     """
 
     _N_FIELDS     = len(FIELD_DEFS)
@@ -170,73 +171,70 @@ class PollTelemetryRegister:
         self._stop_event  = Event()
         self._buf_lock    = Lock()
 
-        self._scrub_thread     = Thread(target=self._scrub_worker, daemon=True)
-        self._telemetry_thread = Thread(target=self._telemetry_worker, daemon=True)
+        self._scrub_thread     = Thread(target=self._scrub_worker, daemon=True, name='scrub')
+        self._telemetry_thread = Thread(target=self._telemetry_worker, daemon=True, name='telemetry')
         self._scrub_thread.start()
         self._telemetry_thread.start()
 
-        self._last_write_time = 0.0
-        self._scrub_count     = 0
+        self._scrub_count = 0
 
-        # v6 telemetry state
-        self._canary_seed       = randbytes(CANARY_SIZE)
-        self._last_canary       = self._canary_seed
-        self._telemetry_hits    = 0
-        self._telemetry_events  = []
-        self._last_hit_time     = None
-        self._observer_periods  = []
+        # v6 telemetry state (no lock needed — only written by telemetry thread,
+        # read by main thread only after stop())
+        self._canary_seed      = randbytes(CANARY_SIZE)
+        self._last_canary      = bytearray(CANARY_SIZE)   # starts all-zero → first write triggers hit
+        self._telemetry_hits   = 0
+        self._telemetry_events = []
+        self._last_hit_time    = None
+        self._observer_periods = []
 
         self._simulate_observer = os.environ.get('SIMULATE_OBSERVER', '0') == '1'
-        self._observer_thread   = None
         if self._simulate_observer:
-            self._observer_thread = Thread(target=self._observer_worker, daemon=True)
+            self._observer_thread = Thread(target=self._observer_worker, daemon=True, name='observer')
             self._observer_thread.start()
+        else:
+            self._observer_thread = None
 
-    def _write_canary(self):
-        with self._buf_lock:
-            struct.pack_into(f'{CANARY_SIZE}s', self._active_buf, CANARY_OFFSET, self._canary_seed)
-            self._last_canary = self._canary_seed
+    # ——— lock-free internal helpers (caller must hold _buf_lock) ————————————
+    def _write_canary_locked(self):
+        struct.pack_into(f'{CANARY_SIZE}s', self._active_buf, CANARY_OFFSET, self._canary_seed)
 
-    def _read_canary(self):
-        with self._buf_lock:
-            raw = bytes(self._active_buf[CANARY_OFFSET:CANARY_OFFSET + CANARY_SIZE])
-        return raw
+    def _read_canary_locked(self):
+        return bytes(self._active_buf[CANARY_OFFSET:CANARY_OFFSET + CANARY_SIZE])
 
+    # ——— background threads ———————————————————————————————————————————
     def _telemetry_worker(self):
         while not self._stop_event.is_set():
             sleep(TELEMETRY_POLL_S)
-            current = self._read_canary()
+            with self._buf_lock:
+                current = self._read_canary_locked()
             if current != self._last_canary:
-                now = perf_counter()
+                now      = perf_counter()
                 delta_ms = None
                 if self._last_hit_time is not None:
                     delta_ms = (now - self._last_hit_time) * 1000.0
                     self._observer_periods.append(delta_ms)
-                self._last_hit_time = now
+                self._last_hit_time  = now
                 self._telemetry_hits += 1
+                self._last_canary     = current
                 self._telemetry_events.append({
-                    't': now,
-                    'delta_ms': delta_ms,
-                    'addr': self.shared_address(),
-                    'epoch_hint': self.current_epoch_hint(),
+                    't':         now,
+                    'delta_ms':  delta_ms,
+                    'addr':      self.shared_address(),
+                    'epoch':     self._read_epoch_hint(),
                 })
-                self._last_canary = current
 
     def _observer_worker(self):
-        """
-        Prototype-only demonstrator: every 500 ms, mutate one byte in the canary
-        to imitate a regular polling actor perturbing the region.
-        """
+        """Prototype-only: simulates a polling actor mutating the canary every 500 ms."""
         while not self._stop_event.is_set():
             sleep(0.5)
             with self._buf_lock:
-                idx = randint(0, CANARY_SIZE - 1)
+                idx  = randint(0, CANARY_SIZE - 1)
                 base = CANARY_OFFSET + idx
-                cur = self._active_buf[base]
-                if isinstance(cur, bytes):
+                cur  = self._active_buf[base]
+                if isinstance(cur, (bytes, bytearray)):
                     cur = cur[0]
-                new = bytes([(cur ^ 0x01) & 0xFF])
-                memmove(addressof(self._active_buf) + base, new, 1)
+                new_byte = bytes([(cur ^ 0x01) & 0xFF])
+                memmove(addressof(self._active_buf) + base, new_byte, 1)
 
     def _scrub_worker(self):
         while not self._stop_event.is_set():
@@ -251,6 +249,14 @@ class PollTelemetryRegister:
                 scrub_buffer(self._active_buf, self._buf_size)
             self._scrub_count += 1
 
+    def _read_epoch_hint(self):
+        try:
+            raw = bytes(self._active_buf[:HEADER_SIZE])
+            _, _, _tick, epoch, _ = struct.unpack(HEADER_FMT, raw)
+            return epoch
+        except Exception:
+            return -1
+
     def stop(self):
         self._stop_event.set()
         self._scrub_event.set()
@@ -259,6 +265,7 @@ class PollTelemetryRegister:
         if self._observer_thread is not None:
             self._observer_thread.join(timeout=2.0)
 
+    # ——— public API ————————————————————————————————————————————————
     def add(self, entity: Entity):
         self.register[entity.name] = entity
 
@@ -286,9 +293,8 @@ class PollTelemetryRegister:
     def sync_shared(self, tick, epoch):
         with self._buf_lock:
             self._buf_size = self._write_real(self._active_buf, tick, epoch)
-            self._write_canary()
+            self._write_canary_locked()
         self._refresh_all_decoys(tick, epoch)
-        self._last_write_time = perf_counter()
         self._scrub_event.set()
 
     def swap_shared(self, tick, epoch):
@@ -300,49 +306,23 @@ class PollTelemetryRegister:
         with self._buf_lock:
             self._buf_size   = self._write_real(new_buf, tick, epoch)
             self._active_buf = new_buf
-            self._write_canary()
+            self._write_canary_locked()
         del old_buf
         gc.collect()
 
         self._decoys[self._decoy_idx] = create_string_buffer(self._DECOY_SIZE)
         self._decoy_idx = (self._decoy_idx + 1) % N_DECOYS
         self._refresh_all_decoys(tick, epoch)
-
-        self._last_write_time = perf_counter()
         self._scrub_event.set()
 
-    def shared_address(self):
-        return addressof(self._active_buf)
-
-    def decoy_addresses(self):
-        return [addressof(d) for d in self._decoys]
-
-    def shared_size(self):
-        return self._buf_size
-
-    def scrub_count(self):
-        return self._scrub_count
-
-    def current_field_order(self):
-        return list(self._field_order)
-
-    def current_pad_sizes(self):
-        return list(self._pad_sizes)
-
-    def telemetry_hits(self):
-        return self._telemetry_hits
-
-    def telemetry_events(self):
-        return list(self._telemetry_events)
-
-    def current_epoch_hint(self):
-        try:
-            with self._buf_lock:
-                raw = bytes(self._active_buf[:HEADER_SIZE])
-            _, _, tick, epoch, _ = struct.unpack(HEADER_FMT, raw)
-            return epoch
-        except Exception:
-            return -1
+    def shared_address(self):      return addressof(self._active_buf)
+    def decoy_addresses(self):     return [addressof(d) for d in self._decoys]
+    def shared_size(self):         return self._buf_size
+    def scrub_count(self):         return self._scrub_count
+    def telemetry_hits(self):      return self._telemetry_hits
+    def telemetry_events(self):    return list(self._telemetry_events)
+    def current_field_order(self): return list(self._field_order)
+    def current_pad_sizes(self):   return list(self._pad_sizes)
 
     def observer_mean_ms(self):
         if not self._observer_periods:
@@ -350,6 +330,7 @@ class PollTelemetryRegister:
         return sum(self._observer_periods) / len(self._observer_periods)
 
 
+# ── globals ───────────────────────────────────────────────────────────────
 entityRegister = PollTelemetryRegister()
 entityLogger   = EntityLogger()
 
@@ -392,7 +373,7 @@ def gameloop():
 
                 entityRegister.swap_shared(tick, epoch)
 
-                mean_ms = entityRegister.observer_mean_ms()
+                mean_ms  = entityRegister.observer_mean_ms()
                 mean_txt = f"{mean_ms:.1f}ms" if mean_ms is not None else "n/a"
                 print(
                     f"[swap] tick={tick} epoch={epoch} "
@@ -423,10 +404,10 @@ def gameloop():
         mean_ms = entityRegister.observer_mean_ms()
         if mean_ms is not None:
             print(f"TELEMETRY_MEAN_DELTA_MS: {mean_ms:.2f}")
-        for idx, ev in enumerate(entityRegister.telemetry_events()[-10:], start=1):
+        for idx, ev in enumerate(entityRegister.telemetry_events()[-10:], 1):
             print(
-                f"[telemetry {idx}] addr={hex(ev['addr'])} "
-                f"epoch_hint={ev['epoch_hint']} delta_ms={ev['delta_ms']}"
+                f"[telemetry {idx:02d}] addr={hex(ev['addr'])} "
+                f"epoch={ev['epoch']} delta_ms={ev['delta_ms']}"
             )
 
     except KeyboardInterrupt:
