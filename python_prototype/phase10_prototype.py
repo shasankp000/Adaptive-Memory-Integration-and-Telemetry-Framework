@@ -26,14 +26,20 @@ Expected outcome
 * Game side: round-trip enc/dec [OK] every epoch, same as v9
 * [v10-exec] lines prove the key-derivation page was live, used, and
   destroyed within the same epoch — no stable key in RAM between epochs
-* Reader v3 still sees CONTENT:encrypted/garbage on every candidate;
+* Reader v3/v4 still sees CONTENT:encrypted/garbage on every candidate;
   score ceiling remains ~+15 (below HIGH threshold of +55)
+
+Fix (v10.1)
+-----------
+* scrub_worker now targets canary_buf (entity data + canary), not new_buf.
+  new_buf holds entity data only; canary_offset = len(new_buf) is an
+  out-of-bounds index into new_buf. Scrub zeroes all bytes in canary_buf
+  (entity region + canary) then writes the zero-canary at canary_offset.
 """
 
 import ctypes
 import gc
 import hashlib
-import math
 import os
 import random
 import secrets
@@ -41,35 +47,32 @@ import struct
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-VERSION          = 10
-MAGIC            = 0x1FA1
-EPOCH_INTERVAL   = 1.0        # seconds between epoch swaps
-COHERENCE_WINDOW = 0.050      # 50 ms plaintext visibility window
-TELEMETRY_POLL   = 0.010      # 10 ms canary-check interval
-SCORE_WINDOW     = 6          # epochs for anomaly score rolling window
+VERSION           = 10
+MAGIC             = 0x1FA1
+EPOCH_INTERVAL    = 1.0
+COHERENCE_WINDOW  = 0.050
+TELEMETRY_POLL    = 0.010
+SCORE_WINDOW      = 6
 SIMULATE_OBSERVER = int(os.environ.get("SIMULATE_OBSERVER", "0"))
-INITIAL_EPOCH    = 0
+INITIAL_EPOCH     = 0
 
-# Poison thresholds (inherited from v7)
-POISON_THRESHOLD = 0.15
-POISON_HOLD      = 10
+POISON_THRESHOLD  = 0.15
+POISON_HOLD       = 10
 
-# Entity coordinate space
 COORD_MIN, COORD_MAX = 0, 9
 
-# Decoy pool
-DECOY_NAMES = ["BOT1", "BOT2", "CT2", "CT3", "GUARD", "SPEC1", "T2", "T3"]
+DECOY_NAMES         = ["BOT1", "BOT2", "CT2", "CT3", "GUARD", "SPEC1", "T2", "T3"]
 INITIAL_DECOY_COUNT = 4
 POISON_DECOY_COUNT  = 12
 
 # ---------------------------------------------------------------------------
-# Entity dataclass
+# Entity
 # ---------------------------------------------------------------------------
 @dataclass
 class Entity:
@@ -80,7 +83,7 @@ class Entity:
         return f"Entity(name={self.name}, x={self.x}, y={self.y})"
 
 # ---------------------------------------------------------------------------
-# Padding / layout helpers (v1 + v2)
+# Layout helpers
 # ---------------------------------------------------------------------------
 def random_pad_sizes() -> List[int]:
     return [random.randint(1, 16) for _ in range(6)]
@@ -91,48 +94,31 @@ def random_field_order() -> List[str]:
     return order
 
 # ---------------------------------------------------------------------------
-# V10 — Polymorphic key derivation (simulates RWX page destroy-after-use)
+# V10 — Polymorphic key derivation
 # ---------------------------------------------------------------------------
 def derive_epoch_key_polymorphic(master_seed: bytes, epoch: int) -> Tuple[bytes, bytes, bytes]:
-    """
-    Simulates the secure_core.c mprotect/RWX pipeline:
-      1. Allocate an anonymous bytearray ("RWX page")
-      2. Write the KDF logic into it (lambda stored in the buffer)
-      3. Run derivation
-      4. Overwrite buffer with os.urandom()
-      5. Log page address + before/after SHA-256 hashes
-      6. Return (mask_name, mask_x, mask_y) — key never persisted
-    """
-    # Step 1: allocate page simulation buffer
     page_size = 256
     page = bytearray(page_size)
 
-    # Step 2: write KDF "code" into page — store derivation input in first bytes
     kdf_input = master_seed + struct.pack("<I", epoch)
     page[:len(kdf_input)] = kdf_input
 
-    page_id = id(page)
+    page_id  = id(page)
     pre_hash = hashlib.sha256(bytes(page)).hexdigest()[:16]
 
-    # Step 3: run SHAKE-256 derivation from the page data
     h = hashlib.shake_256(bytes(page[:len(kdf_input)]))
     raw = h.digest(16)
     mask_name = raw[0:8]
     mask_x    = raw[8:12]
     mask_y    = raw[12:16]
 
-    # Step 4: destroy the page — overwrite with random bytes
     rand_fill = os.urandom(page_size)
     for i in range(page_size):
         page[i] = rand_fill[i]
 
     post_hash = hashlib.sha256(bytes(page)).hexdigest()[:16]
-
-    # Step 5: emit execution trace
     print(f" [v10-exec] epoch={epoch}  page_id=0x{page_id:x}"
           f"  pre={pre_hash}  post={post_hash}  [DESTROYED]")
-
-    # page goes out of scope here — no stable key in RAM
     del page
     return mask_name, mask_x, mask_y
 
@@ -143,24 +129,19 @@ def xor_bytes(data: bytes, mask: bytes) -> bytes:
 
 def encrypt_entity_fields(
     entity: Entity,
-    mask_name: bytes,
-    mask_x:    bytes,
-    mask_y:    bytes,
+    mask_name: bytes, mask_x: bytes, mask_y: bytes,
 ) -> Tuple[bytes, bytes, bytes]:
     name_bytes = entity.name.encode().ljust(8, b"\x00")[:8]
-    enc_name = xor_bytes(name_bytes, mask_name)
-    enc_x    = xor_bytes(struct.pack("<i", entity.x), mask_x)
-    enc_y    = xor_bytes(struct.pack("<i", entity.y), mask_y)
-    return enc_name, enc_x, enc_y
+    return (
+        xor_bytes(name_bytes, mask_name),
+        xor_bytes(struct.pack("<i", entity.x), mask_x),
+        xor_bytes(struct.pack("<i", entity.y), mask_y),
+    )
 
 
 def decrypt_entity_fields(
-    enc_name: bytes,
-    enc_x:    bytes,
-    enc_y:    bytes,
-    mask_name: bytes,
-    mask_x:    bytes,
-    mask_y:    bytes,
+    enc_name: bytes, enc_x: bytes, enc_y: bytes,
+    mask_name: bytes, mask_x: bytes, mask_y: bytes,
 ) -> Tuple[str, int, int]:
     name = xor_bytes(enc_name, mask_name).rstrip(b"\x00").decode(errors="replace")
     x    = struct.unpack("<i", xor_bytes(enc_x, mask_x))[0]
@@ -168,93 +149,73 @@ def decrypt_entity_fields(
     return name, x, y
 
 # ---------------------------------------------------------------------------
-# Buffer layout helpers (v1 + v2 + v9 encryption)
+# Buffer construction
 # ---------------------------------------------------------------------------
-HEADER_SIZE  = 10   # magic(2) + ver(1) + tick(1) + epoch(4) + count(2)
-ENTITY_SIZE  = 22   # name(8) + pad(2) + x(4) + pad(2) + y(4) + pad(2)
+HEADER_SIZE = 10
+ENTITY_SIZE = 22
 
 
 def build_real_buffer(
-    entities:   Dict[str, Entity],
-    tick:       int,
-    epoch:      int,
-    pad_sizes:  List[int],
-    field_order: List[str],
-    mask_name:  bytes,
-    mask_x:     bytes,
-    mask_y:     bytes,
+    entities: Dict[str, Entity],
+    tick: int, epoch: int,
+    pad_sizes: List[int], field_order: List[str],
+    mask_name: bytes, mask_x: bytes, mask_y: bytes,
 ) -> ctypes.Array:
-    """
-    Write encrypted entity fields into a randomly-padded, randomly-ordered
-    packed buffer.  Identical layout logic to v9.
-    """
     entity_list = list(entities.values())
     count = len(entity_list)
 
-    # Compute total size
     total = HEADER_SIZE
     for _ in entity_list:
         for fname in field_order:
-            if fname == "name":
-                total += 8
-            else:
-                total += 4
+            total += 8 if fname == "name" else 4
         total += sum(pad_sizes)
 
     buf = (ctypes.c_uint8 * total)()
     off = 0
 
-    def write_bytes(data: bytes):
+    def wb(data: bytes):
         nonlocal off
         for b in data:
-            buf[off] = b
-            off += 1
+            buf[off] = b; off += 1
 
-    # Header
-    write_bytes(struct.pack("<H", MAGIC))
-    write_bytes(struct.pack("<B", VERSION))
-    write_bytes(struct.pack("<B", tick))
-    write_bytes(struct.pack("<I", epoch))
-    write_bytes(struct.pack("<H", count))
+    wb(struct.pack("<H", MAGIC))
+    wb(struct.pack("<B", VERSION))
+    wb(struct.pack("<B", tick))
+    wb(struct.pack("<I", epoch))
+    wb(struct.pack("<H", count))
 
     pi = 0
     for ent in entity_list:
         enc_name, enc_x, enc_y = encrypt_entity_fields(ent, mask_name, mask_x, mask_y)
         for fname in field_order:
-            write_bytes(os.urandom(pad_sizes[pi % len(pad_sizes)])); pi += 1
-            if fname == "name":
-                write_bytes(enc_name)
-            elif fname == "x":
-                write_bytes(enc_x)
-            elif fname == "y":
-                write_bytes(enc_y)
-
+            wb(os.urandom(pad_sizes[pi % len(pad_sizes)])); pi += 1
+            if fname == "name":  wb(enc_name)
+            elif fname == "x":   wb(enc_x)
+            elif fname == "y":   wb(enc_y)
     return buf
 
 
 def build_decoy_buffer(tick: int, epoch: int) -> ctypes.Array:
-    """Decoy buffer: valid header, random encrypted-looking payload."""
     count = 2
     total = HEADER_SIZE + count * ENTITY_SIZE
-    buf = (ctypes.c_uint8 * total)()
-    off = 0
+    buf   = (ctypes.c_uint8 * total)()
+    off   = 0
 
-    def write_bytes(data: bytes):
+    def wb(data: bytes):
         nonlocal off
         for b in data:
-            buf[off] = b
-            off += 1
+            buf[off] = b; off += 1
 
-    write_bytes(struct.pack("<H", MAGIC))
-    write_bytes(struct.pack("<B", VERSION))
-    write_bytes(struct.pack("<B", tick))
-    write_bytes(struct.pack("<I", epoch))
-    write_bytes(struct.pack("<H", count))
-    write_bytes(os.urandom(count * ENTITY_SIZE))
+    wb(struct.pack("<H", MAGIC))
+    wb(struct.pack("<B", VERSION))
+    wb(struct.pack("<B", tick))
+    wb(struct.pack("<I", epoch))
+    wb(struct.pack("<H", count))
+    wb(os.urandom(count * ENTITY_SIZE))
     return buf
 
 # ---------------------------------------------------------------------------
-# Canary (telemetry)
+# Canary
 # ---------------------------------------------------------------------------
 CANARY_MAGIC = 0xDEADBEEF
 CANARY_SIZE  = 4
@@ -267,16 +228,15 @@ def write_canary(buf: ctypes.Array, offset: int, value: int):
 
 
 def read_canary(buf: ctypes.Array, offset: int) -> int:
-    data = bytes(buf[offset:offset + CANARY_SIZE])
-    return struct.unpack("<I", data)[0]
+    return struct.unpack("<I", bytes(buf[offset:offset + CANARY_SIZE]))[0]
 
 # ---------------------------------------------------------------------------
 # Telemetry ring
 # ---------------------------------------------------------------------------
 class TelemetryRing:
     def __init__(self, capacity: int = 64):
-        self._ring:  deque = deque(maxlen=capacity)
-        self._lock:  threading.Lock = threading.Lock()
+        self._ring  = deque(maxlen=capacity)
+        self._lock  = threading.Lock()
         self.total_hits: int = 0
 
     def record(self, ts: float):
@@ -304,25 +264,17 @@ class TelemetryRing:
 # Anomaly score
 # ---------------------------------------------------------------------------
 def compute_anomaly_score(
-    telemetry:          TelemetryRing,
-    epoch:              int,
-    poison_activations: int,
-    score_window:       int,
-    hits_window:        List[int],
+    telemetry: TelemetryRing,
+    epoch: int, poison_activations: int,
+    score_window: int, hits_window: List[int],
 ) -> Tuple[float, str]:
-    if epoch == 0 or len(hits_window) == 0:
+    if epoch == 0 or not hits_window:
         return 0.0, "LOW     "
-    recent = hits_window[-score_window:]
+    recent    = hits_window[-score_window:]
     mean_hits = sum(recent) / len(recent)
-    mean_d = telemetry.mean_delta()
-    base = mean_hits / max(mean_d, 1.0)
-    score = base + poison_activations * 0.01
-    if score >= 0.5:
-        label = "HIGH    "
-    elif score >= 0.2:
-        label = "MEDIUM  "
-    else:
-        label = "LOW     "
+    mean_d    = telemetry.mean_delta()
+    score     = mean_hits / max(mean_d, 1.0) + poison_activations * 0.01
+    label = "HIGH    " if score >= 0.5 else ("MEDIUM  " if score >= 0.2 else "LOW     ")
     return score, label
 
 # ---------------------------------------------------------------------------
@@ -330,27 +282,24 @@ def compute_anomaly_score(
 # ---------------------------------------------------------------------------
 class SharedState:
     def __init__(self):
-        self.lock             = threading.Lock()
-        self.active_buf:      Optional[ctypes.Array] = None
-        self.canary_buf:      Optional[ctypes.Array] = None
-        self.canary_offset:   int  = 0
-        self.canary_value:    int  = CANARY_MAGIC
-        self.decoy_bufs:      List[ctypes.Array] = []
-        self.epoch:           int  = 0
-        self.tick:            int  = 0
-        self.scrub_count:     int  = 0
-        self.poison_active:   bool = False
-        self.poison_timer:    int  = 0
+        self.lock               = threading.Lock()
+        self.active_buf:        Optional[ctypes.Array] = None
+        self.canary_buf:        Optional[ctypes.Array] = None
+        self.canary_offset:     int  = 0
+        self.canary_value:      int  = CANARY_MAGIC
+        self.decoy_bufs:        List[ctypes.Array] = []
+        self.epoch:             int  = 0
+        self.tick:              int  = 0
+        self.scrub_count:       int  = 0
+        self.poison_active:     bool = False
+        self.poison_timer:      int  = 0
         self.poison_activations: int = 0
-        self.telemetry        = TelemetryRing()
-        self.hits_window:     List[int] = []
-        self._stop_event      = threading.Event()
+        self.telemetry          = TelemetryRing()
+        self.hits_window:       List[int] = []
+        self._stop_event        = threading.Event()
 
-    def stop(self):
-        self._stop_event.set()
-
-    def stopped(self) -> bool:
-        return self._stop_event.is_set()
+    def stop(self):    self._stop_event.set()
+    def stopped(self): return self._stop_event.is_set()
 
 
 _STATE = SharedState()
@@ -379,60 +328,60 @@ def telemetry_worker(state: SharedState):
             state.telemetry.record(time.time())
         last_val = val
 
-
 # ---------------------------------------------------------------------------
-# Scrub worker
+# Scrub worker  —  FIX: target canary_buf, not new_buf
+#
+# new_buf  = entity data only  (size N)
+# canary_buf = entity data + canary (size N + CANARY_SIZE)
+# canary_offset = N  → valid index into canary_buf, out-of-bounds in new_buf
+#
+# Scrub zeroes the entire canary_buf (entity region + canary slot).
 # ---------------------------------------------------------------------------
-def scrub_worker(state: SharedState, buf: ctypes.Array, delay: float):
+def scrub_worker(state: SharedState, canary_buf: ctypes.Array,
+                 canary_offset: int, delay: float):
     time.sleep(delay)
     with state.lock:
-        if buf is state.active_buf:
-            rand_bytes = os.urandom(len(buf))
-            for i in range(len(buf)):
-                buf[i] = rand_bytes[i]
-            write_canary(buf, state.canary_offset, 0x00000000)
+        if canary_buf is state.canary_buf:          # still the active canary buf?
+            rand_bytes = os.urandom(len(canary_buf))
+            for i in range(len(canary_buf)):
+                canary_buf[i] = rand_bytes[i]
+            write_canary(canary_buf, canary_offset, 0x00000000)
             state.scrub_count += 1
-
 
 # ---------------------------------------------------------------------------
 # Decoy management
 # ---------------------------------------------------------------------------
 def refresh_decoys(state: SharedState, count: int, tick: int, epoch: int):
-    keep_count = max(0, count - 2)
-    state.decoy_bufs = state.decoy_bufs[:keep_count]
+    keep = max(0, count - 2)
+    state.decoy_bufs = state.decoy_bufs[:keep]
     while len(state.decoy_bufs) < count:
         state.decoy_bufs.append(build_decoy_buffer(tick, epoch))
 
-
 # ---------------------------------------------------------------------------
-# Core swap: v10 key derivation via polymorphic page
+# Core swap
 # ---------------------------------------------------------------------------
 def swap_shared(
-    state:    SharedState,
+    state: SharedState,
     entities: Dict[str, Entity],
-    tick:     int,
-    epoch:    int,
+    tick: int, epoch: int,
 ) -> str:
-    # Randomise entity positions
     for ent in entities.values():
         ent.x = random.randint(COORD_MIN, COORD_MAX)
         ent.y = random.randint(COORD_MIN, COORD_MAX)
 
-    # Decide decoy count
-    telemetry    = state.telemetry
-    mean_d       = telemetry.mean_delta()
-    epoch_hits   = max(0, telemetry.total_hits - sum(state.hits_window))
+    telemetry  = state.telemetry
+    mean_d     = telemetry.mean_delta()
+    epoch_hits = max(0, telemetry.total_hits - sum(state.hits_window))
     state.hits_window.append(epoch_hits)
 
     score, label = compute_anomaly_score(
         telemetry, epoch, state.poison_activations, SCORE_WINDOW, state.hits_window
     )
 
-    # Poison logic
     if score >= POISON_THRESHOLD:
         if not state.poison_active:
-            state.poison_active = True
-            state.poison_timer  = POISON_HOLD
+            state.poison_active     = True
+            state.poison_timer      = POISON_HOLD
             state.poison_activations += 1
     elif state.poison_active:
         state.poison_timer -= 1
@@ -442,11 +391,10 @@ def swap_shared(
     decoy_count = POISON_DECOY_COUNT if state.poison_active else INITIAL_DECOY_COUNT
     refresh_decoys(state, decoy_count, tick, epoch)
 
-    # --- V10 CORE: derive key via polymorphic page ---
+    # V10: derive key via polymorphic page
     master_seed = secrets.token_bytes(32)
     mask_name, mask_x, mask_y = derive_epoch_key_polymorphic(master_seed, epoch)
 
-    # Build encrypted real buffer
     pad_sizes   = random_pad_sizes()
     field_order = random_field_order()
     new_buf = build_real_buffer(
@@ -454,14 +402,14 @@ def swap_shared(
         mask_name, mask_x, mask_y
     )
 
-    canary_offset = len(new_buf)   # canary appended after entity data
-    canary_buf = (ctypes.c_uint8 * (len(new_buf) + CANARY_SIZE))()
-    for i in range(len(new_buf)):
+    # canary_buf holds entity data + 4-byte canary appended at the end
+    canary_offset = len(new_buf)
+    canary_buf    = (ctypes.c_uint8 * (canary_offset + CANARY_SIZE))()
+    for i in range(canary_offset):
         canary_buf[i] = new_buf[i]
     state.canary_value = CANARY_MAGIC ^ epoch
     write_canary(canary_buf, canary_offset, state.canary_value)
 
-    # Swap
     old_buf = state.active_buf
     with state.lock:
         state.active_buf    = new_buf
@@ -474,25 +422,22 @@ def swap_shared(
         del old_buf
         gc.collect()
 
-    # Launch scrub
-    scrub_t = threading.Thread(
+    # Launch scrub — pass canary_buf + canary_offset (not new_buf)
+    threading.Thread(
         target=scrub_worker,
-        args=(state, new_buf, COHERENCE_WINDOW),
-        daemon=True
-    )
-    scrub_t.start()
+        args=(state, canary_buf, canary_offset, COHERENCE_WINDOW),
+        daemon=True,
+    ).start()
 
-    # Decrypt verification (proves round-trip)
+    # Round-trip verification
     print(f" [v10-decrypt] epoch={epoch}  seed={master_seed.hex()[:16]}...")
     for ent_name, ent in entities.items():
-        enc_name, enc_x, enc_y = encrypt_entity_fields(ent, mask_name, mask_x, mask_y)
-        dec_name, dec_x, dec_y = decrypt_entity_fields(
-            enc_name, enc_x, enc_y, mask_name, mask_x, mask_y
-        )
-        status = "[OK]" if (dec_x == ent.x and dec_y == ent.y) else "[FAIL]"
-        print(f"   entity={ent_name} plaintext=({ent.x},{ent.y}) -> enc -> dec=({dec_x},{dec_y}) {status}")
+        en, ex, ey = encrypt_entity_fields(ent, mask_name, mask_x, mask_y)
+        dn, dx, dy = decrypt_entity_fields(en, ex, ey, mask_name, mask_x, mask_y)
+        status = "[OK]" if (dx == ent.x and dy == ent.y) else "[FAIL]"
+        print(f"   entity={ent_name} plaintext=({ent.x},{ent.y}) -> enc -> dec=({dx},{dy}) {status}")
 
-    summary = (
+    return (
         f"[swap] tick={tick} epoch={epoch} real_addr={id(new_buf)} "
         f"decoys={decoy_count} poison={int(state.poison_active)} "
         f"activations={state.poison_activations}\n"
@@ -501,16 +446,14 @@ def swap_shared(
         f" [anomaly] epoch={epoch} score={score:.4f} [{label}] "
         f" hits_window={state.hits_window[-SCORE_WINDOW:]}  delta_var={telemetry.delta_variance():.1f}"
     )
-    return summary
-
 
 # ---------------------------------------------------------------------------
 # Game loop
 # ---------------------------------------------------------------------------
 def game_loop(state: SharedState, entities: Dict[str, Entity], num_epochs: int = 30):
-    tick   = 1
-    epoch  = INITIAL_EPOCH
-    addr   = id(state)
+    tick  = 1
+    epoch = INITIAL_EPOCH
+    addr  = id(state)
 
     print(f"PID:                {os.getpid()}")
     print(f"VERSION:            {VERSION}  (v1+v2+v3+v4+v5+v6+v7+v8+v9 + polymorphic exec layer)")
@@ -522,37 +465,26 @@ def game_loop(state: SharedState, entities: Dict[str, Entity], num_epochs: int =
     print()
 
     for _ in range(num_epochs):
-        summary = swap_shared(state, entities, tick, epoch)
-        print(summary)
+        print(swap_shared(state, entities, tick, epoch))
         time.sleep(EPOCH_INTERVAL)
         epoch += 1
 
     state.stop()
 
-    # Final telemetry dump
     ts = time.time()
     for ent_name, ent in entities.items():
-        print(f"Timestamp: {ts}, Tick: {tick}, Epoch: {epoch}, "
-              f"Entity: {ent_name}={ent}")
+        print(f"Timestamp: {ts}, Tick: {tick}, Epoch: {epoch}, Entity: {ent_name}={ent}")
 
     print()
     print(f"TELEMETRY_TOTAL_HITS: {state.telemetry.total_hits}")
     print(f"TELEMETRY_MEAN_DELTA_MS: {state.telemetry.mean_delta():.2f}")
     print(f"POISON_ACTIVATIONS: {state.poison_activations}")
-    print(f"FINAL_DECOY_COUNT:  "
-          f"{POISON_DECOY_COUNT if state.poison_active else INITIAL_DECOY_COUNT}")
-
+    print(f"FINAL_DECOY_COUNT:  {POISON_DECOY_COUNT if state.poison_active else INITIAL_DECOY_COUNT}")
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     state = _STATE
-
-    # Start telemetry thread
-    tel_thread = threading.Thread(
-        target=telemetry_worker, args=(state,), daemon=True
-    )
-    tel_thread.start()
-
+    threading.Thread(target=telemetry_worker, args=(state,), daemon=True).start()
     game_loop(state, _ENTITIES, num_epochs=30)
