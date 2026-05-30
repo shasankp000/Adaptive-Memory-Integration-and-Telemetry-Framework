@@ -12,6 +12,7 @@ NAME_LEN = 8
 
 class EntityStruct(Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("name", c_char * NAME_LEN),
         ("x", c_int32),
@@ -20,6 +21,7 @@ class EntityStruct(Structure):
 
 class EntityRegisterStruct(Structure):
     _pack_ = 1
+    _layout_ = "ms"
     _fields_ = [
         ("magic", c_uint32),
         ("version", c_uint32),
