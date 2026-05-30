@@ -14,8 +14,8 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | **v2** | Randomized field ordering — shuffle which of name/x/y comes first each epoch | ✅ | ✅ |
 | **v3** | Decoy structures — fake entity registers with valid magic headers and plausible coordinates | ✅ | ✅ |
 | **v4** | Epoch relocation — move structs to new heap addresses each epoch, invalidate old pointers | ✅ | ✅ |
-| **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ✅ | ⬜ |
-| **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ⬜ | ⬜ |
+| **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ✅ | ✅ |
+| **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ✅ | ⬜ |
 | **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ⬜ | ⬜ |
 
 ---
@@ -33,6 +33,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | v2 reader confirmed blind — 20/20 passes returned "No struct found" | ✅ |
 | v3 reader confirmed poisoned — 6–7 hits/pass, zero real, confidence at noise floor | ✅ |
 | v4 reader confirmed churning — address set unstable every pass, real buffer never found | ✅ |
+| v5 reader confirmed too slow — 30/30 scrubs completed, no real buffer observed | ✅ |
 
 ---
 
@@ -113,6 +114,24 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ---
 
+## v5 Validation Notes
+
+- **Scrub counter reached 30/30 — every epoch’s plaintext was destroyed within the 50 ms coherence window.**
+- Reader polling interval was **500 ms**, 10x slower than the coherence window. Reader never observed
+  a real buffer address in any pass; by the time each scan ran, the magic header had already been scrubbed.
+- Explicit `del old_buf; gc.collect()` removed the v4 ghost-buffer lag: no long-lived stale real-buffer
+  address survived across many passes.
+- Reader still saw many plausible decoys because decoy buffers are intentionally never scrubbed.
+  Observable address churn remained unstable, preserving v4’s anti-allowlist effect.
+- Two persistent epoch-0 survivors (`0x7f3ec2b62cf0`, `0x7f3ec2bf1590` / `0x7f3ec2fe8b00`) came from
+  Python runtime internal allocations, not the real register. Their frozen tick/epoch values provide a
+  distinguishing signal a smarter reader might exploit: any candidate whose epoch never increments is not real.
+- **Research question #5 partially answered**: stale snapshots become useless almost immediately once
+  coherence windows are shorter than polling cadence. At 50 ms vs 500 ms polling, the reader missed
+  every real write across the full run.
+
+---
+
 ## Broader Phase Roadmap (from `AMITF_intial_plan.md`)
 
 | Phase | Description | Status |
@@ -132,9 +151,9 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 2. How much entropy before gameplay degradation?
 3. What mutation frequency maximizes instability without correctness cost?
 4. Which telemetry patterns correlate most strongly with polling behaviour?
-5. How quickly do stale snapshots reduce cheat usefulness?
+5. How quickly do stale snapshots reduce cheat usefulness? ✅ **Partially answered** (v5)
 6. Can decoy structures reduce reconstruction confidence to noise floor? ✅ **Answered: yes** (v3)
 
 ---
 
-*Last updated: v4 epoch relocation validated. v5 short-lived coherence windows implemented.*
+*Last updated: v5 short-lived coherence windows validated. v6 polling telemetry tracking implemented.*
