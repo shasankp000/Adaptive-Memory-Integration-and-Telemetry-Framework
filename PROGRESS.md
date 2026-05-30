@@ -11,8 +11,8 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 |-------|-------------|:-----------:|:---------:|
 | **v0** | Stable readable state — packed ctypes structs, double-buffered register | ✅ | ✅ |
 | **v1** | Fragmented layout — random noise padding between every entity field, new layout every epoch | ✅ | ✅ |
-| **v2** | Randomized field ordering — shuffle which of name/x/y comes first each epoch | ⬜ | ⬜ |
-| **v3** | Decoy structures — fake entity registers with valid magic headers and plausible coordinates | ⬜ | ⬜ |
+| **v2** | Randomized field ordering — shuffle which of name/x/y comes first each epoch | ✅ | ✅ |
+| **v3** | Decoy structures — fake entity registers with valid magic headers and plausible coordinates | ✅ | ⬜ |
 | **v4** | Epoch relocation — move structs to new heap addresses each epoch, invalidate old pointers | ⬜ | ⬜ |
 | **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ⬜ | ⬜ |
 | **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ⬜ | ⬜ |
@@ -30,6 +30,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | Concurrent run confirmed — epoch increments observed live across passes | ✅ |
 | Double-buffering swap observable by external reader | ✅ |
 | v1 reader confirmed broken — garbage names and coordinates across all passes | ✅ |
+| v2 reader confirmed blind — 20/20 passes returned "No struct found" | ✅ |
 
 ---
 
@@ -49,11 +50,25 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 - Reader decoded garbage names every pass: `w}5`, `Eg&k`, `=Kh`, `ǹU*B/`, `KP8CT1`, `G*`, `84ܚe`, `jCT1`, etc.
 - Reader decoded garbage coordinates every pass: values like `-496974367`, `1135898192`, `-1810616955`.
 - **Partial name leakage observed** (`KP8CT1`, `:GCT1`, `jCT1`) when leading pad is short enough that
-  the 8-byte name slice partially overlaps the real name bytes. This is a known v1 limitation —
-  targeted for mitigation in v3 (decoy names) and v2 (field reordering).
-- Reader never produced "No struct found" — magic header and count field remain in fixed positions,
-  so `decode_register` always passes the size check before unpacking garbage entity bytes.
-  This confirms the magic anchor is the reader's only reliable foothold — a key target for v3 decoys.
+  the 8-byte name slice partially overlaps the real name bytes. Known v1 limitation — addressed by v2.
+- Reader never produced “No struct found” — magic header and count field at fixed positions meant
+  `decode_register` always passed the size check. Magic anchor confirmed as reader’s only foothold.
+
+---
+
+## v2 Validation Notes
+
+- **Reader completely blind: 20/20 passes returned “No struct found.”** Zero hits across the entire run.
+- Target buffer size range: **84B – 122B**. Reader’s fixed `block_size` of 52B is smaller than every
+  observed epoch buffer, causing the entity region slice to be consistently undersized.
+- Field order shuffled every epoch across all 6 permutations of `[name, x, y]`:
+  observed `['x','name','y']`, `['y','name','x']`, `['name','y','x']`, `['x','y','name']`, etc.
+- **Compounding effect**: v1 padding alone left the reader finding garbage structs. Adding v2 field
+  shuffle collapsed `decode_register` entirely — the two layers multiply rather than add.
+- The variable geometry means the reader’s fixed-size slice captures the wrong byte count for
+  the entity region on every permutation, causing the size check to fail before any decode attempt.
+- This is the anti-economics principle in action: cost to the reader escalated from
+  “decode garbage” (v1) to “find nothing” (v2).
 
 ---
 
@@ -81,4 +96,4 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ---
 
-*Last updated: v1 fragmented layout validated.*
+*Last updated: v2 randomized field ordering validated. v3 decoy structures implemented.*
