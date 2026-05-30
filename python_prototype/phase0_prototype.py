@@ -102,6 +102,14 @@ class EntityRegister:
     def shared_address(self):
         return addressof(self.active)
 
+    def shared_addresses(self):
+        """Returns addresses of both buffers and which is currently active."""
+        return {
+            "active": addressof(self.active),
+            "shared_a": addressof(self.shared_a),
+            "shared_b": addressof(self.shared_b),
+        }
+
     def shared_size(self):
         return sizeof(self.active)
 
@@ -129,8 +137,12 @@ def gameloop():
         i = 0
         print(f"PID: {__import__('os').getpid()}")
         print(f"REGISTER_ADDR: {entityRegister.shared_address()}")
+        addrs = entityRegister.shared_addresses()
+        print(f"BUFFER_A_ADDR: {addrs['shared_a']}")
+        print(f"BUFFER_B_ADDR: {addrs['shared_b']}")
+        print(f"ACTIVE_ADDR:   {addrs['active']}  (starts as buffer A)")
         print(f"REGISTER_SIZE: {entityRegister.shared_size()}")
-        while i < 220:
+        while i < 600:
             sleep(0.001)
             second_counter += 1
             if second_counter - current_second == 20:
@@ -141,6 +153,9 @@ def gameloop():
                     entity.sety(randint(0, 9))
                 # Write to backup, then flip — readers always see a consistent active buffer.
                 entityRegister.swap_shared(tick, epoch)
+                active_now = entityRegister.shared_address()
+                label = "A" if active_now == addrs['shared_a'] else "B"
+                print(f"[swap] tick={tick} epoch={epoch} active=buffer_{label} addr={active_now}")
             if tick >= EPOCH_UPDATE_RULE:
                 epoch += 1
                 entityLogger.log(datetime.now().timestamp(), tick, epoch, entityRegister.snapshot())

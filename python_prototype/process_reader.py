@@ -1,9 +1,12 @@
 import os
 import sys
 import struct
+import time
 
 MAGIC = 0xA11F
 MAGIC_BYTES = struct.pack('<I', MAGIC)
+SCAN_INTERVAL = 0.5   # seconds between each scan pass
+SCAN_PASSES   = 20    # total number of scan passes
 
 class EntityStruct:
     def __init__(self, name, x, y):
@@ -54,6 +57,28 @@ def decode_register(block):
     }
 
 
+def scan_once(target_pid, regions, struct_size):
+    """Scan /proc/<pid>/mem once and return ALL matching structs found."""
+    results = []
+    with open(f'/proc/{target_pid}/mem', 'rb', buffering=0) as mem:
+        for start, end, perms in regions:
+            try:
+                mem.seek(start)
+                chunk = mem.read(end - start)
+            except Exception:
+                continue
+            search_start = 0
+            while True:
+                idx = chunk.find(MAGIC_BYTES, search_start)
+                if idx == -1 or idx + struct_size > len(chunk):
+                    break
+                block = chunk[idx:idx + struct_size]
+                reg = decode_register(block)
+                results.append((start + idx, perms, reg))
+                search_start = idx + 1
+    return results
+
+
 def main():
     target_pid = int(input('Enter target process pid: '))
 
@@ -61,33 +86,48 @@ def main():
         print('Error! Process does not exist or entered PID is incorrect')
         sys.exit(0)
 
-    with open(f'/proc/{target_pid}/maps', 'r') as f:
-        target_maps = f.read()
-
-    regions = parse_maps(target_maps)
     struct_size = struct.calcsize('<IIIII') + 2 * struct.calcsize('<8sii')
 
-    with open(f'/proc/{target_pid}/mem', 'rb', buffering=0) as mem:
-        found = False
-        for start, end, perms in regions:
-            try:
-                mem.seek(start)
-                chunk = mem.read(end - start)
-            except Exception:
-                continue
-            idx = chunk.find(MAGIC_BYTES)
-            if idx != -1 and idx + struct_size <= len(chunk):
-                block = chunk[idx:idx + struct_size]
-                reg = decode_register(block)
-                print(f"Found at 0x{start + idx:x} in region {perms}")
-                print(f"magic=0x{reg['magic']:x} version={reg['version']} tick={reg['tick']} epoch={reg['epoch']} count={reg['count']}")
-                for e in reg['entities']:
-                    print(e)
-                found = True
-                break
+    prev_addresses = set()
 
-        if not found:
-            print('Struct not found')
+    print(f"\nStarting {SCAN_PASSES} scan passes, {SCAN_INTERVAL}s apart...\n")
+
+    for pass_num in range(1, SCAN_PASSES + 1):
+        # Re-read maps each pass since active address may change
+        try:
+            with open(f'/proc/{target_pid}/maps', 'r') as f:
+                target_maps = f.read()
+        except FileNotFoundError:
+            print(f"[pass {pass_num}] Process {target_pid} no longer exists. Stopping.")
+            break
+
+        regions = parse_maps(target_maps)
+        results = scan_once(target_pid, regions, struct_size)
+
+        if not results:
+            print(f"[pass {pass_num:02d}] No struct found.")
+        else:
+            current_addresses = {addr for addr, _, _ in results}
+            new_addrs = current_addresses - prev_addresses
+            gone_addrs = prev_addresses - current_addresses
+
+            for addr, perms, reg in results:
+                tag = " <-- NEW ADDR (swap detected!)" if addr in new_addrs else ""
+                print(
+                    f"[pass {pass_num:02d}] 0x{addr:x} ({perms}){tag}  "
+                    f"tick={reg['tick']} epoch={reg['epoch']}  "
+                    f"entities: {reg['entities']}"
+                )
+
+            if gone_addrs:
+                for old in gone_addrs:
+                    print(f"[pass {pass_num:02d}]           0x{old:x} no longer seen (buffer rotated out)")
+
+            prev_addresses = current_addresses
+
+        time.sleep(SCAN_INTERVAL)
+
+    print("\nScan complete.")
 
 
 if __name__ == '__main__':
