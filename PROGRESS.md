@@ -18,6 +18,10 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ✅ | ✅ |
 | **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ✅ | ✅ |
 | **v8** | Smarter reader + anomaly scoring — upgrade reader with heuristic filters, add suspicion score output to prototype | ✅ | ✅ |
+| **v9** | Encryption epoch system — per-epoch TPM-seeded XOR/SHAKE-256 key derivation, real payload fields encrypted at write, decoys carry plausible encrypted garbage | ⬜ | ⬜ |
+| **v10** | Polymorphic execution layer — integrate `secure_core.c` mprotect/RWX pipeline; key derivation and reconstruction logic executes from anonymous pages, overwritten after use | ⬜ | ⬜ |
+| **v11** | Secure IPC bridge — integrate `secure_ipc.c` memfd/unnamed-mapping anonymous arena; per-packet SHAKE-256 rotating XOR masks on telemetry stream between prototype and reader | ⬜ | ⬜ |
+| **v12** | Full integration — encryption + polymorphic exec + secure IPC + anomaly scoring all active simultaneously; run reader v2 again and measure residual precision | ⬜ | ⬜ |
 
 ---
 
@@ -38,6 +42,10 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | v6 telemetry confirmed — 60 hits / 30 epochs, mean delta converged to ~493 ms | ✅ |
 | v7 adaptive poisoning confirmed — poison triggered at epoch 1, decoys 4→12, held for full run | ✅ |
 | v8 smarter reader confirmed — heuristics work on noise but fail to disambiguate real from decoys | ✅ |
+| v9 encryption layer — reader v2 should decode only garbage even from HIGH-confidence addresses | ⬜ |
+| v10 polymorphic exec — key derivation address never stable in RAM; `secure_core.c` compiled + linked | ⬜ |
+| v11 IPC bridge — `secure_ipc.c` compiled + linked; telemetry stream verified delta-XOR resistant | ⬜ |
+| v12 integration — reader v2 precision measured at full-stack; residual signal documented | ⬜ |
 
 ---
 
@@ -219,7 +227,52 @@ The next defensive layer (encryption epoch system) must eliminate content-level 
 
 ---
 
-## v8 Design — Smarter Reader + Anomaly Scoring
+## v9–v12 Design Overview
+
+### v9 — Encryption Epoch System
+
+Direct response to v8's finding: structural heuristics alone give ~5% precision. Moving defence to the **content level**.
+
+- Per-epoch key derived via `secrets.token_bytes(32)` (mock TPM seed) + epoch number fed into SHAKE-256
+- Real entity `name`, `x`, `y` fields XOR-encrypted with per-field independent masks at write time
+- Decoys carry **plausible-looking encrypted garbage** — random bytes in valid ranges after decryption attempt,
+  but with wrong keys they decode to nonsense. Key never written to RAM — held in Python variable only.
+- Reader v2 will still score these addresses HIGH (valid structure, incrementing epoch, stable address)
+  but will decode only garbage from every candidate — including the real one — without the key.
+- **Expected outcome:** reader precision drops to 0%. All 19 HIGH candidates return undecipherable content.
+
+### v10 — Polymorphic Execution Layer
+
+Integrates `secure_core.c` (from `docs/AMITF_plan2_anti_DMA_architecture.md`):
+
+- Key derivation and epoch rotation logic executes from anonymous RWX pages via `mutate_and_run()`
+- Page is written, cache-flushed, and locked RX before execution; overwritten with garbage after return
+- Key pointer kept in Python variable (simulating CPU register storage), never in a scannable heap slot
+- **Expected outcome:** even a DMA card that scans physical RAM during the key derivation window
+  finds a garbage page — the key never exists as a stable, addressable RAM value.
+
+### v11 — Secure IPC Bridge
+
+Integrates `secure_ipc.c` (from `docs/AMITF_plan3_secure_userpsace_ipc_layer.md`):
+
+- Telemetry stream between prototype and reader moves through `memfd_create()` anonymous arena (Linux)
+  or unnamed `CreateFileMapping()` (Windows) — no filesystem path, invisible to scanners
+- Each telemetry frame uses **per-packet SHAKE-256 rotating XOR masks** derived from `(tpm_seed + packet_id)`
+- Delta-XOR attack defeated: consecutive frame XOR recovers noise, not coordinate deltas
+- **Expected outcome:** a DMA card observing the IPC channel sees random bytes with no recoverable
+  telemetry signal even across multiple captured frames.
+
+### v12 — Full Integration Run
+
+- All layers active simultaneously: encryption + polymorphic exec + secure IPC + v7 adaptive poisoning + anomaly scoring
+- Run reader v2 against the full-stack prototype and measure residual precision
+- Document the final noise floor: expected outcome is reader v2 achieving **0% content precision**
+  with all 19 HIGH candidates returning undecipherable payloads
+- This closes Phase 0 of the prototype roadmap and feeds directly into Phase 1 (Telemetry Prototype in Rust/C++)
+
+---
+
+## v8 Design — Smarter Reader + Anomaly Scoring (reference)
 
 v7 closes the offensive prototype arc (v0–v7). v8 pivots to the **defensive measurement arc**:
 build a smarter reader that applies the heuristics we know are exploitable, then measure how much
@@ -280,4 +333,4 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 
 ---
 
-*Last updated: v8 smarter reader validated. Encryption epoch system (v9) next — content-level payload encryption to eliminate semantic leakage from well-behaved decoys.*
+*Last updated: v8 validated. v9–v12 roadmap added: encryption epoch system → polymorphic exec → secure IPC bridge → full integration run. Phase 0 closes at v12.*
