@@ -13,8 +13,8 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | **v1** | Fragmented layout — random noise padding between every entity field, new layout every epoch | ✅ | ✅ |
 | **v2** | Randomized field ordering — shuffle which of name/x/y comes first each epoch | ✅ | ✅ |
 | **v3** | Decoy structures — fake entity registers with valid magic headers and plausible coordinates | ✅ | ✅ |
-| **v4** | Epoch relocation — move structs to new heap addresses each epoch, invalidate old pointers | ✅ | ⬜ |
-| **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ⬜ | ⬜ |
+| **v4** | Epoch relocation — move structs to new heap addresses each epoch, invalidate old pointers | ✅ | ✅ |
+| **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ✅ | ⬜ |
 | **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ⬜ | ⬜ |
 | **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ⬜ | ⬜ |
 
@@ -32,6 +32,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | v1 reader confirmed broken — garbage names and coordinates across all passes | ✅ |
 | v2 reader confirmed blind — 20/20 passes returned "No struct found" | ✅ |
 | v3 reader confirmed poisoned — 6–7 hits/pass, zero real, confidence at noise floor | ✅ |
+| v4 reader confirmed churning — address set unstable every pass, real buffer never found | ✅ |
 
 ---
 
@@ -76,20 +77,39 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 ## v3 Validation Notes
 
 - **Reader saw 6–7 hits per pass. Zero were real. Confidence poisoned to noise floor.**
-- 4 intended decoy addresses (`0x7f7e185f4f30/f70/fb0/ff0`) decoded cleanly every pass with
-  plausible names (`BOT2`, `CT2`, `GUARD`, `T3`, `SPEC1`, `BOT1`, `T2`, `CT3`) and coordinates in `[0,9]`.
-- 2 ghost hits (`0x7f7e1856fd70`, `0x7f7e1856f230`) alternated `<-- NEW` / `<-- gone` every 2 passes— this is the real double-buffer’s active/backup swap being caught by the magic scan at the wrong
-  packed offset. Undecodable garbage, but its address churn makes it look like an unstable struct.
-- 2–3 noise false positives (`0x7f7e18584d50`, `0x7f7e18584ff0`) from heap regions where random noise
-  bytes coincidentally match `0x1FA1`. Decoded garbage names: `JT$D`, `*r23d2`, `[!oXs`, `wXCT`, `jCT1`.
-- `ICT1` appearing in pass 16 confirmed as a noise false positive — partial `CT1` bytes in random noise
-  ahead of a coincidental magic match. Not a real decode.
+- 4 intended decoy addresses decoded cleanly every pass with plausible names (`BOT2`, `CT2`, `GUARD`,
+  `T3`, `SPEC1`, `BOT1`, `T2`, `CT3`) and coordinates in `[0,9]`.
+- 2 ghost hits from the real double-buffer alternated `<-- NEW` / `<-- gone` every 2 passes — the
+  real buffers caught by the magic scan at the wrong packed offset. Undecodable but address-churning.
+- 2–3 noise false positives from heap regions where random noise bytes coincidentally match `0x1FA1`.
+  Decoded garbage names: `JT$D`, `*r23d2`, `[!oXs`, `wXCT`, `jCT1`.
 - Decoy names close enough to real names (`CT2`, `CT3` vs `CT1`) that name-filtering offers no
   disambiguation. Epoch counters on all hits increment plausibly. No observable distinguishing signal.
 - **Research question #6 answered**: yes, decoy structures reduce reconstruction confidence to the
   noise floor. A reader cannot determine which (if any) of the 7 hits is real.
-- Ghost hit addresses still stable across the run (real buffers `buf_a`/`buf_b` are fixed-lifetime
-  ctypes objects). This is the remaining foothold targeted by v4 epoch relocation.
+
+---
+
+## v4 Validation Notes
+
+- **Real buffer address changed every epoch. Reader had zero contact with real data across 20 passes.**
+- Decoy address set churned every 2 passes: 2 addresses `<-- gone`, 2 `<-- NEW` per epoch pair.
+  Any allowlist or blocklist a reader builds is partially stale within 2 passes.
+- Real buffer address never appeared in reader output at any pass — v1+v2 fragmentation prevented
+  the magic scan from matching it even after relocation gave it a fresh address.
+- **GC lag observation**: initial `_active_buf` from `gameinit()` (addr `0x7fdc5a362a50`) remained
+  visible in `/proc/pid/maps` for **15 passes** (epochs 0–11) after being dereferenced on the first
+  `swap_shared()` call, before finally disappearing at pass 16 (epoch 12). Python’s garbage collector
+  does not immediately reclaim ctypes buffers — the allocation persists until the GC cycle runs.
+  In production this lag should be eliminated with an explicit `del old_buf; gc.collect()` call
+  immediately after the new buffer is assigned. Without this, a reader that catches the stale address
+  early has a multi-epoch window to observe it (though the data inside is still v1+v2 garbage).
+- One persistent noise false positive (`0x7fdc5a7bc290` / `0x7fdc5a7bc7a0`) survived most of the run —
+  a Python runtime internal allocation whose bytes happen to contain `0x1FA1` at a stable offset.
+  Produced garbage names and wild coordinates; not a real struct. `CT1` appearing in pass 20 at this
+  address is a partial name coincidence in random noise, not a real decode.
+- **Remaining foothold**: one noise false-positive address is long-lived and stable. Targeted by v5
+  (short coherence windows) which prevents any address from being useful even if correctly identified.
 
 ---
 
@@ -117,4 +137,4 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ---
 
-*Last updated: v3 decoy structures validated. v4 epoch relocation implemented.*
+*Last updated: v4 epoch relocation validated. v5 short-lived coherence windows implemented.*
