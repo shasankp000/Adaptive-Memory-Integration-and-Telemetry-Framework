@@ -20,7 +20,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | **v8** | Smarter reader + anomaly scoring — upgrade reader with heuristic filters, add suspicion score output to prototype | ✅ | ✅ |
 | **v9** | Encryption epoch system — per-epoch TPM-seeded XOR/SHAKE-256 key derivation, real payload fields encrypted at write, decoys carry plausible encrypted garbage | ✅ | ✅ |
 | **v10** | Polymorphic execution layer — integrate `secure_core.c` mprotect/RWX pipeline; key derivation and reconstruction logic executes from anonymous pages, overwritten after use | ✅ | ✅ |
-| **v11** | Secure IPC bridge — integrate `secure_ipc.c` memfd/unnamed-mapping anonymous arena; per-packet SHAKE-256 rotating XOR masks on telemetry stream between prototype and reader | ⬜ | ⬜ |
+| **v11** | Secure IPC bridge — integrate `secure_ipc.c` memfd/unnamed-mapping anonymous arena; per-packet SHAKE-256 rotating XOR masks on telemetry stream between prototype and reader | ✅ | ✅ |
 | **v12** | Full integration — encryption + polymorphic exec + secure IPC + anomaly scoring all active simultaneously; run reader v2 again and measure residual precision | ⬜ | ⬜ |
 
 ---
@@ -44,7 +44,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | v8 smarter reader confirmed — heuristics work on noise but fail to disambiguate real from decoys | ✅ |
 | v9 encryption layer — reader v3 decodes only garbage from ALL candidates; content-valid = 0/N | ✅ |
 | v10 polymorphic exec — key derivation page destroyed every epoch; reader v4 timing-inference yields 0 content-valid reads | ✅ |
-| v11 IPC bridge — `secure_ipc.c` compiled + linked; telemetry stream verified delta-XOR resistant | ⬜ |
+| v11 IPC bridge — `memfd` arena live at `0x7f35427f6570`; 30/30 packets sent with `readback=[OK]`; reader v5 Attack B yields 0 content-valid frames, Attack C yields 0 plausible delta frames; structural score ceiling capped at 15/55 | ✅ |
 | v12 integration — reader v2 precision measured at full-stack; residual signal documented | ⬜ |
 
 ---
@@ -321,6 +321,56 @@ inference attack (reader v4's new capability) is fully defeated by the sub-epoch
 
 ---
 
+## v11 Validation Notes
+
+### Prototype Output (phase11_prototype.py)
+
+- **All 30 epochs completed with correct `[OK]` round-trips** — every `plaintext → encrypt → decrypt`
+  cycle verified for both CT1 and T1 across epochs 0–29.
+- **IPC arena live**: `memfd` anonymous shared-memory arena allocated at `0x7f35427f6570`,
+  `frame_size=20B`, `slots=64`. Arena address never appears in any filesystem path.
+- **30/30 IPC packets sent with `readback=[OK]`**: every per-packet SHAKE-256 XOR mask derived from
+  `(tpm_seed + packet_id)` applied and verified on readback. No packet corruption or replay observed.
+- **v10 polymorphic exec confirmed active**: `[v10-exec]` log lines present every epoch —
+  unique `page_id`, `pre ≠ post` hash, `[DESTROYED]` tag. Exec layer fully compatible with IPC bridge.
+- **v11 decrypt confirmed active**: per-epoch seed changes every epoch; both entities round-trip clean.
+- **TELEMETRY_TOTAL_HITS: 59**, mean delta **501.18 ms**, POISON_ACTIVATIONS: 1, FINAL_DECOY_COUNT: 4 —
+  consistent with v10 baseline. IPC bridge adds zero observable overhead.
+- Anomaly score: `[HIGH]` at epoch 1 (score=0.5000, correct poison trigger), then stable `[LOW]`
+  plateau (~0.0140) for epochs 2–29. `delta_var` converged to ~203,000 ms² — unchanged from v10.
+
+### Reader Output (process_reader_v5.py) — Key Findings
+
+**Reader v5 adds three attack vectors on top of v4's full suite:**
+
+- **Structural scan (IPC arena intercept)**: 22 IPC arena candidates found via `rw-p` region scan.
+  Best structural candidate scored **15/55** — identical to the v9/v10 ceiling. Zero HIGH-confidence
+  candidates. All slots decoded as `encryptedgarbage` (`wildcoords(−30)` fires on every read).
+  True arena at `0x7f35427f6570` is not recoverable from structure alone.
+
+- **Attack B — probe-seed brute-force**: 2,002 "valid" frames decoded across all arena candidates,
+  but **content-valid: 0**. All matches were `seednullmask PLAUSIBLE` false positives from unrelated
+  `rw-p` regions (ELF dynamic linker metadata, stack frames). The true arena produces only
+  `encryptedgarbage` to an observer holding the wrong key. By passes 14–20, all arenas return
+  `read FAILED` — the `memfd` mapping is torn down between scan windows.
+
+- **Attack C — delta-XOR**: **0 plausible delta frames** out of 2,002 attempts. Consecutive frame
+  XOR of per-packet SHAKE-256 rotating masks recovers noise, not coordinate deltas — exactly as
+  designed. The delta-XOR attack is fully defeated.
+
+**Score ceiling unchanged at 15/55.** The IPC layer closes the last attack surface that v10 left
+open: a DMA card observing the IPC channel now sees only random bytes with no recoverable telemetry
+signal even across multiple captured frames.
+
+### v11 Conclusion
+
+The secure IPC bridge is confirmed working as designed. All three adversarial attacks (structural
+intercept, seed brute-force, delta-XOR) yield **0 content-valid results**. Combined with v9
+encryption and v10 polymorphic exec, content precision remains **0%** at the full v11 stack.
+Phase 0 of the prototype roadmap is now complete pending v12 full-integration measurement.
+
+---
+
 ## v9–v12 Design Overview
 
 ### v9 — Encryption Epoch System ✅
@@ -346,7 +396,7 @@ Simulates `secure_core.c` (from `docs/AMITF_plan2_anti_DMA_architecture.md`) in 
 - **Outcome**: timing-inference attack (reader v4) yields 0 content-valid reads. Score ceiling unchanged at +15.
   Key derivation page never stable between epochs — DMA temporal attack window closed.
 
-### v11 — Secure IPC Bridge
+### v11 — Secure IPC Bridge ✅
 
 Integrates `secure_ipc.c` (from `docs/AMITF_plan3_secure_userpsace_ipc_layer.md`):
 
@@ -354,8 +404,8 @@ Integrates `secure_ipc.c` (from `docs/AMITF_plan3_secure_userpsace_ipc_layer.md`
   or unnamed `CreateFileMapping()` (Windows) — no filesystem path, invisible to scanners
 - Each telemetry frame uses **per-packet SHAKE-256 rotating XOR masks** derived from `(tpm_seed + packet_id)`
 - Delta-XOR attack defeated: consecutive frame XOR recovers noise, not coordinate deltas
-- **Expected outcome:** a DMA card observing the IPC channel sees random bytes with no recoverable
-  telemetry signal even across multiple captured frames.
+- **Outcome:** reader v5 Attack B yields 0 content-valid frames; Attack C yields 0 plausible delta frames.
+  A DMA card observing the IPC channel sees random bytes with no recoverable telemetry signal.
 
 ### v12 — Full Integration Run
 
@@ -428,4 +478,4 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 
 ---
 
-*Last updated: v10 validated. Polymorphic exec layer confirmed — key-derivation page destroyed every epoch, timing-inference attack (reader v4) yields 0 content-valid reads. Score ceiling unchanged at +15/55. v11 next: Secure IPC bridge — per-packet SHAKE-256 rotating XOR masks on telemetry stream.*
+*Last updated: v11 validated. Secure IPC bridge confirmed — `memfd` arena live, 30/30 packets with `readback=[OK]`, reader v5 Attack B/C yield 0 content-valid results, structural score ceiling 15/55. v12 next: Full integration — all layers simultaneously active, reader v2 residual precision measurement.*
