@@ -7,8 +7,11 @@ exposes an anomaly score scalar and a SecureIPCArena instance.
 
 Design
 ------
-The hunter is IDLE by default.  It wakes only when the caller signals
-that the anomaly score has crossed HUNTER_TRIGGER_SCORE (MEDIUM level).
+The hunter is IDLE by default.  It wakes when EITHER:
+  (a) the caller's anomaly score crosses trigger_score (default 0.01), OR
+  (b) a direct /proc/<own_pid>/mem fd poll detects an open handle from
+      any foreign PID (checked inside notify_score each epoch).
+
 While active it:
   1. Scans /proc/*/fd for open file descriptors pointing to
      /proc/<our_pid>/mem  — the clearest signal of an external reader.
@@ -22,8 +25,10 @@ While active it:
        /proc/<pid>/environ    — environment variable KEYS only
   4. Emits the dossier as a JSON-serialised, SHAKE-256 masked IPC packet
      through the caller's SecureIPCArena (slot 63, reserved for hunter).
-  5. Rescans every HUNTER_INTERVAL seconds while anomaly >= MEDIUM.
-  6. Returns to IDLE once anomaly is LOW for HUNTER_IDLE_AFTER epochs.
+  5. Rescans every HUNTER_INTERVAL seconds while anomaly >= trigger_score
+     OR while /proc/mem handles are still open.
+  6. Returns to IDLE once anomaly is LOW for HUNTER_IDLE_AFTER epochs
+     AND no /proc/mem handles are open.
 
 Constraints
 -----------
@@ -31,7 +36,7 @@ Constraints
   * No new IPC mechanisms — reuses the v11 memfd arena (slot 63).
   * False-positive guard: skips own PID, PIDs with loginuid == 0xFFFFFFFF
     (no session), and any PID whose /proc/<pid>/mem fd does NOT point at
-    our own PID's mem path.
+    our own PID’s mem path.
 
 Usage
 -----
@@ -68,18 +73,22 @@ class HunterConfig:
     Attributes
     ----------
     trigger_score       Anomaly score threshold that wakes the hunter.
-                        Matches the MEDIUM band from v8 (>= 0.20).
+                        Set to 0.01 — any detectable canary activity
+                        (even 1 hit/epoch) crosses this floor.
+                        The old 0.20 MEDIUM threshold was unreachable
+                        given the current canary-hit rate formula.
     hunter_interval     Rescan cadence while active (seconds).
                         Deliberately non-round to avoid phase-locking
                         with the 1.0 s epoch interval.
     idle_after_epochs   Number of consecutive LOW-score epochs before
-                        the hunter returns to IDLE.
+                        the hunter returns to IDLE (also requires no
+                        open /proc/mem handles).
     ipc_slot            Arena slot index reserved for hunter dossiers.
                         Default 63 (last slot, away from telemetry).
     max_dossier_age     Seconds before a seen PID is evicted from the
                         dossier cache (PID may have been recycled).
     """
-    trigger_score:      float = 0.20
+    trigger_score:      float = 0.01   # was 0.20 — lowered to any-activity floor
     hunter_interval:    float = 2.3
     idle_after_epochs:  int   = 3
     ipc_slot:           int   = 63
@@ -87,7 +96,7 @@ class HunterConfig:
 
 
 # ---------------------------------------------------------------------------
-# IPC constants (must match phase12_prototype.py)
+# IPC constants (must match phase1_prototype.py)
 # ---------------------------------------------------------------------------
 IPC_HEADER_SIZE  = 4    # packet_id uint32 LE
 IPC_FRAME_SIZE   = 20   # header + 16-byte payload used by telemetry
@@ -148,6 +157,20 @@ def _open_fds_pointing_to(pid: int, target_path: str) -> List[str]:
     except Exception:
         pass
     return hits
+
+
+def _any_foreign_mem_handle(own_pid: int, mem_target: str) -> bool:
+    """
+    Quick O(n-PIDs) poll: return True if ANY foreign PID currently holds
+    an open fd pointing at mem_target (i.e. /proc/<own_pid>/mem).
+    Used as a direct wake trigger independent of the anomaly score.
+    """
+    for pid in _all_pids():
+        if pid == own_pid:
+            continue
+        if _open_fds_pointing_to(pid, mem_target):
+            return True
+    return False
 
 
 def _parse_status_uid(status_text: str) -> Optional[int]:
@@ -294,18 +317,17 @@ def _build_dossier(pid: int, epoch: int,
     if status_text is None:
         return None  # process gone
 
-    uid         = _parse_status_uid(status_text) or 0
-    gid         = _parse_status_gid(status_text) or 0
-    loginuid    = _read_loginuid(pid)
+    uid          = _parse_status_uid(status_text) or 0
+    gid          = _parse_status_gid(status_text) or 0
+    loginuid     = _read_loginuid(pid)
     environ_keys = _read_environ_keys(pid)
-    exe         = _read_exe(pid)
-    cmdline     = _read_cmdline(pid)
-    session     = _classify_session(environ_keys)
+    exe          = _read_exe(pid)
+    cmdline      = _read_cmdline(pid)
+    session      = _classify_session(environ_keys)
 
     if existing is not None:
         existing.last_seen_epoch = epoch
         existing.seen_count     += 1
-        # Refresh fields that can change (e.g. after sudo)
         existing.uid          = uid
         existing.gid          = gid
         existing.exe          = exe or existing.exe
@@ -343,9 +365,9 @@ def _emit_dossier(arena, tpm_seed: bytes, packet_id: int,
                   dossier: Dossier, slot: int) -> None:
     """
     Serialise dossier to JSON, XOR-mask it, and write it into the
-    IPC arena at the hunter's reserved slot.
+    IPC arena at the hunter’s reserved slot.
 
-    The wire format is:
+    Wire format:
       [4B packet_id LE] [4B payload_len LE] [N bytes masked JSON]
     Truncated to HUNTER_SLOT_SIZE bytes if the JSON is too long.
     """
@@ -360,7 +382,6 @@ def _emit_dossier(arena, tpm_seed: bytes, packet_id: int,
         frame   = (struct.pack("<I", packet_id)
                    + struct.pack("<I", len(payload))
                    + masked)
-        # Write at the hunter's reserved slot (slot index * frame size)
         offset = slot * HUNTER_SLOT_SIZE
         arena.write(offset, frame)
     except Exception:
@@ -375,12 +396,15 @@ class ObserverHunter:
     """
     Reactive observer hunter daemon thread.
 
-    Lifecycle
-    ---------
-    start()  → spawns the internal daemon thread; thread sleeps immediately.
-    notify_score(score, epoch)  → called by swap_shared each epoch.
-                                  Wakes the thread if score >= trigger.
-    stop()   → signals the thread to exit cleanly.
+    Wake paths
+    ----------
+    A. Score-based: notify_score() is called each epoch; if score >=
+       trigger_score (0.01) the thread is woken.
+    B. Direct fd poll: notify_score() also checks whether any foreign PID
+       currently holds /proc/<own_pid>/mem open.  If yes, the thread is
+       woken immediately regardless of the anomaly score.  This handles
+       the case where the reader doesn't generate enough canary hits to
+       raise the score above the floor.
     """
 
     def __init__(self, cfg: HunterConfig, arena, tpm_seed: bytes):
@@ -392,12 +416,12 @@ class ObserverHunter:
 
         # State
         self._active         = False
-        self._low_count      = 0       # consecutive LOW-score epochs while active
+        self._low_count      = 0
         self._current_score  = 0.0
         self._current_epoch  = 0
         self._packet_id      = 0
         self._dossiers: Dict[int, Dossier] = {}
-        self._dossier_ts: Dict[int, float] = {}  # last-seen wall clock
+        self._dossier_ts: Dict[int, float] = {}
 
         # Synchronisation
         self._lock       = threading.Lock()
@@ -406,7 +430,7 @@ class ObserverHunter:
         self._thread     = threading.Thread(
             target=self._run, daemon=True, name="observer-hunter")
 
-        # Public counters (read by prototype for summary)
+        # Public counters
         self.total_suspects_found: int = 0
         self.total_scans:          int = 0
         self.trigger_count:        int = 0
@@ -418,39 +442,51 @@ class ObserverHunter:
     def start(self):
         self._thread.start()
         print("[hunter] ObserverHunter started — IDLE (trigger score:"
-              f" {self._cfg.trigger_score:.2f})")
+              f" {self._cfg.trigger_score:.2f}, direct-fd-poll: enabled)")
 
     def stop(self):
         self._stop_event.set()
-        self._wake_event.set()   # unblock any wait
+        self._wake_event.set()
         self._thread.join(timeout=5.0)
 
     def notify_score(self, score: float, epoch: int):
         """
-        Called from the game loop each epoch with the current anomaly score.
-        Transitions IDLE→ACTIVE or resets the idle-cooldown counter.
+        Called from the game loop each epoch.  Two independent wake paths:
+          A. score >= trigger_score  (anomaly-based)
+          B. any foreign PID has /proc/<own_pid>/mem open right now
+        Either path flips IDLE → ACTIVE and wakes the scan thread.
         """
+        # Direct fd poll (wake path B) — cheap, done outside the lock
+        direct_hit = _any_foreign_mem_handle(self._own_pid, self._mem_target)
+
         with self._lock:
             self._current_score = score
             self._current_epoch = epoch
 
+            should_wake = (score >= self._cfg.trigger_score) or direct_hit
+
             if not self._active:
-                if score >= self._cfg.trigger_score:
+                if should_wake:
                     self._active    = True
                     self._low_count = 0
                     self.trigger_count += 1
+                    reason = []
+                    if score >= self._cfg.trigger_score:
+                        reason.append(f"score={score:.4f}>={self._cfg.trigger_score:.2f}")
+                    if direct_hit:
+                        reason.append("direct-fd-hit")
                     print(f"[hunter] TRIGGERED at epoch={epoch}"
-                          f"  score={score:.4f}  initiating scan")
+                          f"  reason=[{', '.join(reason)}]  initiating scan")
                     self._wake_event.set()
             else:
-                if score < self._cfg.trigger_score:
+                if not should_wake:
                     self._low_count += 1
                     if self._low_count >= self._cfg.idle_after_epochs:
                         self._active = False
                         print(f"[hunter] returning to IDLE at epoch={epoch}"
-                              f"  (score LOW for {self._low_count} epochs)")
+                              f"  (LOW for {self._low_count} epochs, no fd hits)")
                 else:
-                    self._low_count = 0  # reset cooldown on any non-LOW epoch
+                    self._low_count = 0
 
     # ------------------------------------------------------------------
     # Internal thread
@@ -458,39 +494,35 @@ class ObserverHunter:
 
     def _run(self):
         while not self._stop_event.is_set():
-            # Sleep until triggered or stopped
             self._wake_event.wait()
             self._wake_event.clear()
 
             if self._stop_event.is_set():
                 break
 
-            # Active scan loop
             while not self._stop_event.is_set():
                 with self._lock:
                     active = self._active
                     epoch  = self._current_epoch
 
                 if not active:
-                    break  # back to outer wait
+                    break
 
                 self._scan(epoch)
-                # Sleep between scans — non-round interval to avoid
-                # phase-locking with the 1.0 s game epoch
                 self._stop_event.wait(timeout=self._cfg.hunter_interval)
 
     def _scan(self, epoch: int):
         """
         One full scan iteration:
           1. Enumerate all PIDs.
-          2. For each PID (not ours), check for open /proc/<our_pid>/mem fds.
+          2. For each PID (not ours), check for open /proc/<own_pid>/mem fds.
           3. Build / update dossier.
           4. Emit via IPC.
           5. Prune stale dossiers.
         """
         self.total_scans += 1
-        now      = time.time()
-        found    = []   # (pid, fd_hits)
+        now   = time.time()
+        found = []
 
         for pid in _all_pids():
             if pid == self._own_pid:
@@ -504,7 +536,6 @@ class ObserverHunter:
             existing = self._dossiers.get(pid)
             dossier  = _build_dossier(pid, epoch, existing)
             if dossier is None:
-                # PID vanished mid-scan
                 self._dossiers.pop(pid, None)
                 self._dossier_ts.pop(pid, None)
                 continue
