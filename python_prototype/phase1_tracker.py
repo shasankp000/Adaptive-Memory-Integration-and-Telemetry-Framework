@@ -8,7 +8,7 @@ exposes an anomaly score scalar and a SecureIPCArena instance.
 Design
 ------
 The hunter is IDLE by default.  It wakes when EITHER:
-  (a) the caller’s anomaly score crosses trigger_score (default 0.01), OR
+  (a) the caller's anomaly score crosses trigger_score (default 0.01), OR
   (b) a direct /proc/<own_pid>/mem fd poll inside notify_score() detects
       an open handle from any foreign PID.
 
@@ -29,7 +29,18 @@ To catch it reliably the hunter uses TWO detection paths:
   Path 2 — Live scan (catches persistent readers)
       _scan() also does its own live /proc/*/fd enumeration.
       hunter_interval is now 0.3 s so this fires well within the
-      reader’s lifetime even without Path 1.
+      reader's lifetime even without Path 1.
+
+Logging
+-------
+All [hunter] output is written to BOTH stdout AND a dedicated log file:
+
+    hunter_suspects_<pid>_<YYYYMMDD_HHMMSS>.log
+
+The file is created in HunterConfig.log_dir (defaults to the directory
+that contains this script).  Every line is timestamped and flushed
+immediately so `tail -f` works live.  The resolved path is available
+as ObserverHunter.log_path after construction.
 
 Constraints
 -----------
@@ -45,6 +56,7 @@ Usage
     cfg    = HunterConfig()
     hunter = ObserverHunter(cfg, ipc_arena, ipc_tpm_seed)
     hunter.start()
+    print(f"[hunter] logging suspects to: {hunter.log_path}")
 
     # Each epoch, after computing anomaly score:
     hunter.notify_score(score, epoch)
@@ -59,6 +71,7 @@ import struct
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple, Any
 
 
@@ -76,16 +89,19 @@ class HunterConfig:
     idle_after_epochs : 3 consecutive LOW + no fd hits before going IDLE.
     ipc_slot          : 63 (last arena slot, away from telemetry traffic).
     max_dossier_age   : 60 s before a cached dossier is evicted.
+    log_dir           : directory for the suspect log file (default: next to
+                        this script).  Set to None to disable file logging.
     """
     trigger_score:      float = 0.01
     hunter_interval:    float = 0.3    # was 2.3 s — too slow for short-lived readers
     idle_after_epochs:  int   = 3
     ipc_slot:           int   = 63
     max_dossier_age:    float = 60.0
+    log_dir:            Optional[str] = None   # None → auto (script directory)
 
 
 # ---------------------------------------------------------------------------
-# IPC constants (must match phase1_prototype.py)
+# IPC constants (must match phase12_prototype.py)
 # ---------------------------------------------------------------------------
 IPC_HEADER_SIZE  = 4
 IPC_FRAME_SIZE   = 20
@@ -381,6 +397,82 @@ class _FdSnapshot:
 
 
 # ---------------------------------------------------------------------------
+# Hunter Logger  —  tee [hunter] lines to stdout + log file
+# ---------------------------------------------------------------------------
+
+class _HunterLogger:
+    """
+    Thread-safe logger that writes every [hunter] message to:
+      1. stdout  (always)
+      2. a timestamped .log file  (if log_path is not None)
+
+    Each file line is prefixed with a wall-clock timestamp so the log is
+    useful even when the prototype's own stdout is being tailed separately.
+    """
+
+    def __init__(self, log_path: Optional[str]):
+        self.log_path = log_path
+        self._fh: Optional[Any] = None
+        self._lock = threading.Lock()
+
+        if log_path is not None:
+            try:
+                os.makedirs(os.path.dirname(os.path.abspath(log_path)),
+                            exist_ok=True)
+                self._fh = open(log_path, "w", buffering=1,  # line-buffered
+                                encoding="utf-8", errors="replace")
+                self._fh.write(
+                    f"# AMITF hunter suspect log\n"
+                    f"# started {datetime.now().isoformat(timespec='seconds')}\n"
+                    f"# pid={os.getpid()}\n"
+                    f"# ---\n"
+                )
+                self._fh.flush()
+            except Exception as exc:
+                print(f"[hunter] WARNING: could not open log file {log_path!r}: {exc}")
+                self._fh = None
+
+    def log(self, msg: str) -> None:
+        """Print to stdout and, if open, append timestamped line to file."""
+        print(msg)
+        if self._fh is not None:
+            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]  # HH:MM:SS.mmm
+            with self._lock:
+                try:
+                    self._fh.write(f"[{ts}] {msg}\n")
+                    self._fh.flush()
+                except Exception:
+                    pass
+
+    def close(self) -> None:
+        if self._fh is not None:
+            try:
+                self._fh.write(
+                    f"# closed {datetime.now().isoformat(timespec='seconds')}\n"
+                )
+                self._fh.flush()
+                self._fh.close()
+            except Exception:
+                pass
+            self._fh = None
+
+
+def _make_log_path(cfg: HunterConfig) -> Optional[str]:
+    """Derive the log file path from config, or None if logging is disabled."""
+    if cfg.log_dir is None:
+        # Default: same directory as this script
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    elif cfg.log_dir == "":
+        return None   # empty string explicitly disables file logging
+    else:
+        base_dir = cfg.log_dir
+
+    ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+    pid = os.getpid()
+    return os.path.join(base_dir, f"hunter_suspects_{pid}_{ts}.log")
+
+
+# ---------------------------------------------------------------------------
 # Observer Hunter
 # ---------------------------------------------------------------------------
 
@@ -402,6 +494,11 @@ class ObserverHunter:
     queue first — building dossiers from the snapshot data — before
     doing its own live /proc scan.  This ensures detection even when the
     reader exits before hunter_interval (0.3 s) fires.
+
+    Logging
+    -------
+    All output goes through self._logger which tees to stdout AND a
+    dedicated log file.  Access the resolved path via self.log_path.
     """
 
     def __init__(self, cfg: HunterConfig, arena, tpm_seed: bytes):
@@ -416,9 +513,9 @@ class ObserverHunter:
         self._current_score  = 0.0
         self._current_epoch  = 0
         self._packet_id      = 0
-        self._dossiers:    Dict[int, Dossier]       = {}
-        self._dossier_ts:  Dict[int, float]         = {}
-        self._pending_fd_hits: List[_FdSnapshot]    = []   # queued snapshots
+        self._dossiers:    Dict[int, Dossier]    = {}
+        self._dossier_ts:  Dict[int, float]      = {}
+        self._pending_fd_hits: List[_FdSnapshot] = []
 
         self._lock       = threading.Lock()
         self._wake_event = threading.Event()
@@ -430,29 +527,44 @@ class ObserverHunter:
         self.total_scans:          int = 0
         self.trigger_count:        int = 0
 
+        # Logger (stdout + file)
+        log_path      = _make_log_path(cfg)
+        self._logger  = _HunterLogger(log_path)
+        self.log_path = self._logger.log_path   # None if file logging disabled
+
+    # ------------------------------------------------------------------
+    # Convenience wrapper
+    # ------------------------------------------------------------------
+
+    def _hlog(self, msg: str) -> None:
+        """Write a hunter message to stdout and the suspect log file."""
+        self._logger.log(msg)
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def start(self):
         self._thread.start()
-        print(
+        self._hlog(
             "[hunter] ObserverHunter started — IDLE"
             f" (trigger_score={self._cfg.trigger_score:.2f}"
             f", hunter_interval={self._cfg.hunter_interval}s"
-            f", direct-fd-snapshot: enabled)"
+            f", direct-fd-snapshot: enabled"
+            f", log={self.log_path or 'disabled'})"
         )
 
     def stop(self):
         self._stop_event.set()
         self._wake_event.set()
         self._thread.join(timeout=5.0)
+        self._logger.close()
 
     def notify_score(self, score: float, epoch: int):
         """
         Called from the game loop each epoch.
 
-        1. Run direct fd poll RIGHT NOW (in the caller’s thread).
+        1. Run direct fd poll RIGHT NOW (in the caller's thread).
            Snapshot any PIDs found — even if they vanish before _scan() runs.
         2. Wake the hunter thread if score or direct hit crosses the threshold.
         """
@@ -475,7 +587,6 @@ class ObserverHunter:
             self._current_score = score
             self._current_epoch = epoch
 
-            # Queue snapshots for the scan thread
             if snapshots:
                 self._pending_fd_hits.extend(snapshots)
 
@@ -493,7 +604,7 @@ class ObserverHunter:
                     if direct_hit:
                         pids = [p for p, _ in live_hits]
                         reasons.append(f"direct-fd-hit pids={pids}")
-                    print(
+                    self._hlog(
                         f"[hunter] TRIGGERED at epoch={epoch}"
                         f"  reason=[{', '.join(reasons)}]  initiating scan"
                     )
@@ -503,7 +614,7 @@ class ObserverHunter:
                     self._low_count += 1
                     if self._low_count >= self._cfg.idle_after_epochs:
                         self._active = False
-                        print(
+                        self._hlog(
                             f"[hunter] returning to IDLE at epoch={epoch}"
                             f"  (LOW for {self._low_count} epochs, no fd hits)"
                         )
@@ -567,10 +678,10 @@ class ObserverHunter:
             self._dossiers[pid]   = dossier
             self._dossier_ts[pid] = now
 
-            print(f"[hunter] SUSPECT (snapshot) → {dossier.summary()}")
-            print(f"[hunter]   fd_hits={snap.fd_hits}")
+            self._hlog(f"[hunter] SUSPECT (snapshot) → {dossier.summary()}")
+            self._hlog(f"[hunter]   fd_hits={snap.fd_hits}")
             if dossier.environ_keys:
-                print(f"[hunter]   environ_keys={dossier.environ_keys}")
+                self._hlog(f"[hunter]   environ_keys={dossier.environ_keys}")
 
             _emit_dossier(
                 self._arena, self._tpm_seed,
@@ -598,10 +709,10 @@ class ObserverHunter:
             self._dossiers[pid]   = dossier
             self._dossier_ts[pid] = now
 
-            print(f"[hunter] SUSPECT (live) → {dossier.summary()}")
-            print(f"[hunter]   fd_hits={fd_hits}")
+            self._hlog(f"[hunter] SUSPECT (live) → {dossier.summary()}")
+            self._hlog(f"[hunter]   fd_hits={fd_hits}")
             if dossier.environ_keys:
-                print(f"[hunter]   environ_keys={dossier.environ_keys}")
+                self._hlog(f"[hunter]   environ_keys={dossier.environ_keys}")
 
             _emit_dossier(
                 self._arena, self._tpm_seed,
@@ -612,7 +723,7 @@ class ObserverHunter:
 
         total_found = len(pending) + len(live_found)
         if total_found == 0:
-            print(
+            self._hlog(
                 f"[hunter] scan #{self.total_scans} epoch={epoch}"
                 f"  no /proc/mem handles found (snapshot=0, live=0)"
             )
@@ -623,7 +734,7 @@ class ObserverHunter:
             if now - ts > self._cfg.max_dossier_age
         ]
         for p in expired:
-            print(f"[hunter] evicting stale dossier pid={p}")
+            self._hlog(f"[hunter] evicting stale dossier pid={p}")
             self._dossiers.pop(p, None)
             self._dossier_ts.pop(p, None)
 
@@ -637,6 +748,7 @@ class ObserverHunter:
             f"  HUNTER_TOTAL_SCANS:   {self.total_scans}",
             f"  HUNTER_SUSPECTS:      {self.total_suspects_found}",
             f"  HUNTER_DOSSIERS:      {len(self._dossiers)}",
+            f"  HUNTER_LOG_FILE:      {self.log_path or 'disabled'}",
         ]
         for pid, d in self._dossiers.items():
             lines.append(f"    └─ {d.summary()}")
