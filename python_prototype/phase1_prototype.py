@@ -22,7 +22,7 @@ All v1–v11 defensive layers remain fully active (identical to v12).
 
 Expected behaviour
 ------------------
-  No reader running     → hunter stays IDLE for the full 30-epoch run.
+  No reader running     → hunter stays IDLE for the full run.
                           HUNTER_TRIGGER_COUNT = 0.
   Reader v5 started     → anomaly crosses MEDIUM at epoch 1;
   concurrently            hunter wakes, scans, finds /proc/<pid>/mem
@@ -617,7 +617,7 @@ def run_integration_check(pid):
 # ---------------------------------------------------------------------------
 # Game loop
 # ---------------------------------------------------------------------------
-def game_loop(state, entities, num_epochs=30):
+def game_loop(state, entities, num_epochs=300):
     tick  = 1
     epoch = INITIAL_EPOCH
 
@@ -648,6 +648,7 @@ def game_loop(state, entities, num_epochs=30):
     print(f"  HUNTER_INTERVAL:   {hunter_cfg.hunter_interval}s")
     print(f"  HUNTER_IDLE_AFTER: {hunter_cfg.idle_after_epochs} LOW epochs")
     print(f"  HUNTER_IPC_SLOT:   {hunter_cfg.ipc_slot}")
+    print(f"  NUM_EPOCHS:        {num_epochs}  (~{num_epochs}s run time)")
     print("=" * 70)
     print()
 
@@ -715,4 +716,4 @@ if __name__ == "__main__":
     state = _STATE
     threading.Thread(
         target=telemetry_worker, args=(state,), daemon=True).start()
-    game_loop(state, _ENTITIES, num_epochs=30)
+    game_loop(state, _ENTITIES, num_epochs=300)
