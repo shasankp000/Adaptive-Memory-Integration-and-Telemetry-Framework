@@ -38,6 +38,22 @@ Tier 3 — epoch fd poll in notify_score()
     Belt-and-suspenders scan in the game-loop thread once per epoch.
     Catches any reader that holds /proc/<pid>/mem open for a full second.
 
+    Self-open suppression: the outward /proc/*/fd scan performed inside
+    notify_score() can itself trigger an inotify IN_OPEN on our mem file
+    on certain kernel paths.  The inotify callback discards any hit whose
+    only matching PIDs are the prototype itself (own_pid), treating it as
+    outcome (c) — silent, no wake, no dossier update.  Additionally,
+    _find_foreign_mem_handles already skips own_pid in the fd loop, so
+    the Tier 3 scan never self-reports.
+
+Anonymous dossier seen_count integrity
+---------------------------------------
+seen_count on the anonymous dossier only increments when a genuinely new
+inotify event is accepted (post-debounce).  The rate-limit log branch no
+longer mutates the dossier — a separate `increment` flag on
+_build_anonymous_dossier(increment=True/False) controls whether the
+seen_count is bumped.
+
 Key design note
 ---------------
 inotify on /proc pseudofiles works on Linux >= 3.x when the watch is
@@ -230,6 +246,10 @@ def _find_foreign_mem_handles(
 
     The permission_denied flag lets the caller distinguish "nobody has it open"
     from "someone has it open but we can't see them".
+
+    own_pid is always excluded — this prevents the Tier 3 poll from
+    self-reporting and eliminates the inotify → Tier-3 → inotify feedback loop
+    that would produce spurious self-open events.
     """
     results: List[Tuple[int, List[str]]] = []
     any_eperm = False
@@ -417,17 +437,33 @@ def _build_dossier(
     )
 
 
-def _build_anonymous_dossier(epoch: int, existing: Optional["Dossier"] = None) -> "Dossier":
+def _build_anonymous_dossier(
+    epoch: int,
+    existing: Optional["Dossier"] = None,
+    increment: bool = True,
+) -> "Dossier":
     """
     Construct a minimal Dossier for a confirmed-but-opaque opener.
 
     Used when inotify fires IN_OPEN but the outward /proc/*/fd scan is
     blocked by PermissionError (reader is root, we are not).  pid=-1
     signals "anonymous" to downstream consumers.
+
+    Parameters
+    ----------
+    epoch     : current game epoch.
+    existing  : previously built anonymous dossier, if any.
+    increment : when True (default) bump seen_count and update
+                last_seen_epoch.  Pass False when only refreshing
+                metadata without a new inotify event — e.g. when
+                the rate-limit cooldown fires but no new IN_OPEN was
+                received.  This prevents seen_count from inflating on
+                every log-cooldown tick rather than on real events.
     """
     if existing is not None:
-        existing.last_seen_epoch = epoch
-        existing.seen_count     += 1
+        if increment:
+            existing.last_seen_epoch = epoch
+            existing.seen_count     += 1
         return existing
     return Dossier(
         pid=-1,
@@ -575,16 +611,26 @@ class _InotifyMemWatcher:
     watcher sets self.last_open_was_anonymous = True so ObserverHunter can
     emit an anonymous-open dossier instead of logging a misleading "no fd"
     message.
+
+    Self-open suppression (Tier 3 feedback loop)
+    ---------------------------------------------
+    The Tier 3 poll in notify_score() calls _find_foreign_mem_handles(),
+    which iterates /proc/*/fd symlinks.  On certain kernel paths this
+    iteration itself triggers an IN_OPEN on our own mem file.  The
+    callback filters out any event whose only matching PIDs are own_pid
+    (outcome (c) — silent) so the Tier 3 poll cannot re-trigger Tier 1.
     """
 
     def __init__(
         self,
         mem_path:   str,
-        on_open,            # callable(epoch: int, anonymous: bool)
+        own_pid:    int,
+        on_open,            # callable(epoch: int, anonymous: bool, hits: list)
         stop_event: threading.Event,
         get_epoch,          # callable() -> int
     ):
         self._mem_path  = mem_path
+        self._own_pid   = own_pid
         self._on_open   = on_open
         self._stop      = stop_event
         self._get_epoch = get_epoch
@@ -599,6 +645,7 @@ class _InotifyMemWatcher:
         self.open_events:  int  = 0   # total raw IN_OPEN events received
         self.open_fired:   int  = 0   # callbacks actually dispatched (post-debounce)
         self.close_events: int  = 0
+        self.self_open_suppressed: int = 0  # Tier-3 self-opens silently dropped
 
         self._setup()
 
@@ -658,14 +705,22 @@ class _InotifyMemWatcher:
                     if now - self._last_open_ts < _OPEN_DEBOUNCE_S:
                         continue
                     self._last_open_ts = now
-                    self.open_fired   += 1
                     epoch = self._get_epoch()
                     # Outward scan — check for permission-denied
                     hits, any_eperm = _find_foreign_mem_handles(
-                        os.getpid(), self._mem_path
+                        self._own_pid, self._mem_path
                     )
-                    anonymous = (not hits) and any_eperm
-                    self._on_open(epoch, anonymous, hits)
+                    # Self-open suppression: discard if every matching PID is
+                    # own_pid (the Tier 3 poll path can generate these).
+                    # _find_foreign_mem_handles already skips own_pid, so if
+                    # hits is empty AND any_eperm is False this is a pure
+                    # self-open artefact — fall through to outcome (c).
+                    if not hits and not any_eperm:
+                        # outcome (c): self-open / kernel artefact — silent
+                        self.self_open_suppressed += 1
+                        continue
+                    self.open_fired += 1
+                    self._on_open(epoch, anonymous=(not hits) and any_eperm, hits=hits)
 
                 if mask & (_IN_CLOSE_NOWRITE | _IN_CLOSE_WRITE):
                     self.close_events += 1
@@ -776,8 +831,13 @@ class ObserverHunter:
         self.watcher_anon_count:    int = 0   # anonymous-open events logged
         self.poller_hit_count:      int = 0
 
-        # Rate-limit for anonymous-open log line
-        self._last_anon_log_ts: float = 0.0
+        # Rate-limit state for anonymous-open log line.
+        # _anon_event_pending is set True when a new inotify event arrives
+        # and cleared after the dossier is emitted.  This decouples the
+        # "should we log?" decision from the "did a new event arrive?" question
+        # so that cooldown ticks never bump seen_count.
+        self._last_anon_log_ts:   float = 0.0
+        self._anon_event_pending: bool  = False
 
         # Logger
         log_path      = _make_log_path(cfg)
@@ -787,6 +847,7 @@ class ObserverHunter:
         # Tier 1 — inotify watcher
         self._watcher = _InotifyMemWatcher(
             mem_path   = self._mem_target,
+            own_pid    = self._own_pid,
             on_open    = self._on_inotify_open,
             stop_event = self._stop_event,
             get_epoch  = lambda: self._current_epoch,
@@ -826,6 +887,11 @@ class ObserverHunter:
                               anonymous-open dossier with 1 s rate-limit log.
         (c) hits empty, anonymous=False → self-open or kernel artefact;
                               silent (no log, no wake).
+                              NOTE: outcome (c) is now handled entirely inside
+                              _InotifyMemWatcher._run() before open_fired is
+                              incremented, so this branch should never be
+                              reached.  It is kept as a belt-and-suspenders
+                              guard only.
         """
         if hits:
             # (a) Named hit
@@ -844,19 +910,25 @@ class ObserverHunter:
             return
 
         if anonymous:
-            # (b) Anonymous open — higher-privilege opener
+            # (b) Anonymous open — higher-privilege opener.
+            # A new inotify event has just fired (post-debounce), so this IS
+            # a real event.  Mark the pending flag and always increment
+            # seen_count via _build_anonymous_dossier(increment=True).
             self.watcher_anon_count += 1
+            self._anon_event_pending = True
             now = time.monotonic()
             if now - self._last_anon_log_ts >= _ANON_LOG_COOLDOWN_S:
-                self._last_anon_log_ts = now
+                self._last_anon_log_ts   = now
+                self._anon_event_pending = False
                 self._hlog(
                     f"[hunter] inotify ANONYMOUS-OPEN at epoch={epoch}"
                     f"  (opener is higher-privilege; /proc/*/fd unreadable)"
                     f"  total_anon={self.watcher_anon_count}"
                 )
-                # Build / update anonymous dossier
+                # Build / update anonymous dossier — increment=True because
+                # this call is triggered by a real inotify event.
                 existing = self._dossiers.get(self._ANON_KEY)
-                dossier  = _build_anonymous_dossier(epoch, existing)
+                dossier  = _build_anonymous_dossier(epoch, existing, increment=True)
                 self._dossiers[self._ANON_KEY]   = dossier
                 self._dossier_ts[self._ANON_KEY] = time.time()
                 self.total_suspects_found += 1
@@ -876,9 +948,19 @@ class ObserverHunter:
                         self._low_count = 0
                         self.trigger_count += 1
                         self._wake_event.set()
+            else:
+                # Still within the cooldown window.  The event IS real and has
+                # already been counted in watcher_anon_count, but we do NOT
+                # call _build_anonymous_dossier here — seen_count must not
+                # increment on every tick, only on accepted log windows.
+                # _anon_event_pending=True signals that when the cooldown
+                # expires the next log line should use increment=True to catch
+                # up the single deferred event.
+                pass
             return
 
-        # (c) Self-open / kernel artefact — silent
+        # (c) Self-open / kernel artefact — should not reach here (filtered in
+        #     _InotifyMemWatcher._run()), but guard defensively.
 
     # ------------------------------------------------------------------
     # Fallback poller callback
@@ -984,11 +1066,20 @@ class ObserverHunter:
         1. Update current epoch.
         2. Tier 3 belt-and-suspenders fd poll.
         3. Wake/idle hunter based on score or direct hit.
+
+        Self-open suppression
+        ---------------------
+        _find_foreign_mem_handles already excludes own_pid from its loop, so
+        the Tier 3 poll can never return own_pid in live_hits.  Additionally,
+        any inotify IN_OPEN triggered by the /proc/*/fd traversal inside
+        _find_foreign_mem_handles is silently dropped in
+        _InotifyMemWatcher._run() (outcome (c)) because the outward re-scan
+        from that callback will again find no foreign PIDs and any_eperm=False.
         """
         with self._lock:
             self._current_epoch = epoch
 
-        # Tier 3: epoch-boundary fd poll
+        # Tier 3: epoch-boundary fd poll — own_pid excluded by helper
         live_hits, _ = _find_foreign_mem_handles(self._own_pid, self._mem_target)
         for pid, fd_hits in live_hits:
             exe     = _read_exe(pid)
@@ -1147,6 +1238,7 @@ class ObserverHunter:
                 f"  close_events={self._watcher.close_events}"
                 f"  named_hits={self.watcher_hit_count}"
                 f"  anon_hits={self.watcher_anon_count}"
+                f"  self_open_suppressed={self._watcher.self_open_suppressed}"
             )
         else:
             detection_line = (
