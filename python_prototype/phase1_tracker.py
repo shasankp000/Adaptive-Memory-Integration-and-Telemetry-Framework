@@ -17,8 +17,9 @@ Tier 1 — inotify IN_OPEN on /proc/<own_pid>/mem  (_InotifyMemWatcher)
 
     /proc quirk: pread64() on /proc/*/mem re-triggers IN_OPEN internally
     on every call.  A debounce gate (_OPEN_DEBOUNCE_S = 0.10 s) coalesces
-    rapid-fire events from a single reader into one callback per burst.
-    The gate resets on IN_CLOSE so a genuine re-open is never suppressed.
+    rapid-fire events from one reader session into one callback per burst.
+    The gate resets on IN_CLOSE so a genuine re-open after close is never
+    suppressed.
 
     When the outward /proc/*/fd scan finds nothing (reader is root, we are
     not), the open is logged as SUSPECT(anonymous-open) with a 1 s rate
@@ -87,7 +88,7 @@ import select
 import struct
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Dict, List, Optional, Set, Tuple, Any
 
@@ -266,7 +267,7 @@ def _parse_status_uid(status_text: str) -> Optional[int]:
 
 
 def _parse_status_gid(status_text: str) -> Optional[int]:
-    for line in status_text.splitlines():\
+    for line in status_text.splitlines():
         if line.startswith("Gid:"):
             parts = line.split()
             if len(parts) >= 2:
