@@ -79,6 +79,15 @@ IPC_HEADER_SIZE  = 4
 IPC_PAYLOAD_SIZE = 16
 IPC_FRAME_SIZE   = IPC_HEADER_SIZE + IPC_PAYLOAD_SIZE   # 20 bytes
 
+# Hunter dossier slot constants (must match phase1_tracker.py)
+HUNTER_SLOT_SIZE = 512   # bytes per slot used by the hunter
+HUNTER_IPC_SLOTS = 64    # total slots in the enlarged arena
+
+# Arena sized so that hunter slot 63 at offset 63*512=32256 is in range.
+# Telemetry frames (slots 0-62, 20B each) live in the first 1260 bytes;
+# the remaining space up to 32768 bytes is reserved for the hunter dossier.
+IPC_ARENA_SIZE = HUNTER_IPC_SLOTS * HUNTER_SLOT_SIZE   # 32 768 bytes
+
 READER_SCRIPT    = os.path.join(os.path.dirname(__file__), "process_reader_v2.py")
 READER_PASSES    = 3
 READER_GAP_S     = 0.5
@@ -112,7 +121,7 @@ def random_field_order() -> List[str]:
 # V11 — Secure IPC Arena  (unchanged from v12)
 # ---------------------------------------------------------------------------
 class SecureIPCArena:
-    def __init__(self, size: int = IPC_FRAME_SIZE * 64):
+    def __init__(self, size: int = IPC_ARENA_SIZE):
         self._size    = size
         self._fd      = None
         self._map     = None
@@ -521,12 +530,12 @@ def swap_shared(state, entities, tick, epoch):
         ciphertext = ipc_write_frame(
             state.ipc_arena, pkt_id, plaintext,
             state.ipc_tpm_seed,
-            offset=(pkt_id % 64) * IPC_FRAME_SIZE
+            offset=(pkt_id % 63) * IPC_FRAME_SIZE   # slots 0-62 only
         )
         recovered = ipc_read_frame(
             state.ipc_arena, pkt_id,
             state.ipc_tpm_seed,
-            offset=(pkt_id % 64) * IPC_FRAME_SIZE
+            offset=(pkt_id % 63) * IPC_FRAME_SIZE
         )
         status  = "[OK]" if recovered == plaintext else "[FAIL]"
         ipc_log = (
@@ -621,8 +630,9 @@ def game_loop(state, entities, num_epochs=300):
     tick  = 1
     epoch = INITIAL_EPOCH
 
-    # V11 IPC arena
-    state.ipc_arena = SecureIPCArena(size=IPC_FRAME_SIZE * 64)
+    # V11 IPC arena — sized to 64 * HUNTER_SLOT_SIZE = 32 768 bytes so that
+    # the hunter's _emit_dossier write at offset 63*512=32256 is in range.
+    state.ipc_arena = SecureIPCArena(size=IPC_ARENA_SIZE)
     backend = "memfd" if state.ipc_arena._use_mfd else "bytearray"
 
     # Phase 1 — hunter (arena must exist before hunter is created)
@@ -643,7 +653,7 @@ def game_loop(state, entities, num_epochs=300):
     print(f"  SCORE_WINDOW:      {SCORE_WINDOW} epochs")
     print(f"  IPC_BACKEND:       {backend}"
           f"  arena_addr=0x{state.ipc_arena.address:x}"
-          f"  frame_size={IPC_FRAME_SIZE}B  slots=64")
+          f"  arena_size={IPC_ARENA_SIZE}B  telemetry_slots=63  hunter_slot=63")
     print(f"  HUNTER_TRIGGER:    score >= {hunter_cfg.trigger_score:.2f} (MEDIUM)")
     print(f"  HUNTER_INTERVAL:   {hunter_cfg.hunter_interval}s")
     print(f"  HUNTER_IDLE_AFTER: {hunter_cfg.idle_after_epochs} LOW epochs")
@@ -705,7 +715,7 @@ def game_loop(state, entities, num_epochs=300):
 
     print("=" * 70)
     print("  Phase 1 prototype run COMPLETE")
-    print("  Test: run process_reader_v5.py concurrently and observe hunter output")
+    print("  Test: run process_reader_phase1.py concurrently and observe hunter output")
     print("=" * 70)
 
 
