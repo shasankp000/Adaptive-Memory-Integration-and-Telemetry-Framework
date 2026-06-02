@@ -24,14 +24,18 @@ Expected behaviour
 ------------------
   No reader running     → hunter stays IDLE for the full run.
                           HUNTER_TRIGGER_COUNT = 0.
-  Reader v5 started     → anomaly crosses MEDIUM at epoch 1;
+  Reader phase1 started → anomaly crosses MEDIUM at epoch 1;
   concurrently            hunter wakes, scans, finds /proc/<pid>/mem
                           handle held by the reader, emits dossier.
                           HUNTER_TRIGGER_COUNT = 1.
                           Dossier: exe=python, cmdline contains
-                          process_reader_v5.py, loginuid = test user.
+                          process_reader_phase1.py, loginuid = test user.
   Reader exits          → anomaly drops to LOW; hunter returns to IDLE
                           after HUNTER_IDLE_AFTER consecutive LOW epochs.
+
+Important: run process_reader_phase1.py as the SAME user (non-root) as
+this script so that the hunter can inspect /proc/<reader_pid>/fd.
+Running the reader as root will trigger anonymous-open detection only.
 """
 
 import ctypes
@@ -88,7 +92,10 @@ HUNTER_IPC_SLOTS = 64    # total slots in the enlarged arena
 # the remaining space up to 32768 bytes is reserved for the hunter dossier.
 IPC_ARENA_SIZE = HUNTER_IPC_SLOTS * HUNTER_SLOT_SIZE   # 32 768 bytes
 
-READER_SCRIPT    = os.path.join(os.path.dirname(__file__), "process_reader_v2.py")
+# process_reader_phase1.py is the correct reader for the Phase 1 hunter test.
+# It holds /proc/<pid>/mem open across multiple pread64 passes, giving the
+# inotify watcher and the 0.3 s scan thread enough time to identify the PID.
+READER_SCRIPT    = os.path.join(os.path.dirname(__file__), "process_reader_phase1.py")
 READER_PASSES    = 3
 READER_GAP_S     = 0.5
 
@@ -574,7 +581,7 @@ def swap_shared(state, entities, tick, epoch):
 
 
 # ---------------------------------------------------------------------------
-# V12 integration check  (unchanged from v12)
+# Phase 1 integration check  (uses process_reader_phase1.py)
 # ---------------------------------------------------------------------------
 def run_integration_check(pid):
     result = {
@@ -691,10 +698,10 @@ def game_loop(state, entities, num_epochs=300):
     print("  PHASE 1 OBSERVER HUNTER SUMMARY")
     print(state.hunter.summary())
 
-    # V12 integration check
+    # Phase 1 integration check — launches process_reader_phase1.py once
     print()
     print("=" * 70)
-    print("  INTEGRATION CHECK — reader_v2 residual precision")
+    print("  INTEGRATION CHECK — process_reader_phase1 residual precision")
     print("=" * 70)
     ic = run_integration_check(os.getpid())
     if ic["error"]:
@@ -715,7 +722,7 @@ def game_loop(state, entities, num_epochs=300):
 
     print("=" * 70)
     print("  Phase 1 prototype run COMPLETE")
-    print("  Test: run process_reader_phase1.py concurrently and observe hunter output")
+    print("  Test: run process_reader_phase1.py concurrently (same UID) and observe hunter output")
     print("=" * 70)
 
 
