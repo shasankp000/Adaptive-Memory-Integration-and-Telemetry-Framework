@@ -71,6 +71,41 @@ two channels that ARE observable from outside the process:
   and does a tiny read every HOLD_READ_INTERVAL seconds to keep the fd
   alive in the kernel's fd table.
 
+PRIVILEGES & YAMA PTRACE SCOPE
+--------------------------------
+This reader does NOT require root / sudo when the target prototype is
+running as the SAME user.  Linux's Yama LSM controls cross-process memory
+access via /proc/sys/kernel/yama/ptrace_scope:
+
+  0 — classic ptrace: any process may read any other process it could
+      ptrace (i.e. same UID).  process_vm_readv works without sudo.
+  1 — restricted ptrace (Ubuntu/Debian default): a process may only read
+      its direct descendants OR processes that have called
+      prctl(PR_SET_PTRACER, reader_pid).  Run both prototype and reader
+      from the same shell session, or lower to scope=0 for testing:
+
+          echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope
+
+  2 — admin-only: only CAP_SYS_PTRACE (root) may cross-process read.
+      Requires sudo for this reader.
+  3 — no cross-process ptrace at all; reader cannot function.
+
+RECOMMENDED WORKFLOW (no sudo needed):
+  Terminal 1:  python3 phase1_prototype.py
+  Terminal 2:  python3 process_reader_phase1.py   # enter PID when prompted
+
+Both terminals must run as the same non-root user.  If you get a
+PermissionError on process_vm_readv, lower ptrace_scope to 0 (see above)
+or pass the reader PID to prctl(PR_SET_PTRACER) from the prototype.
+
+NOTE: Running the reader as root (sudo) while the prototype runs as a
+normal user makes the reader a higher-privilege process.  The hunter's
+_FdPoller will still fire (inotify sees the open), but it cannot resolve
+the reader's PID from /proc/*/fd (PermissionError on /proc/<root_pid>/fd).
+The hunter logs an anonymous-open dossier with pid=-1 instead of naming
+the reader.  Run both as the same non-root user for a fully attributed
+dossier.
+
 EXPECTED BEHAVIOUR
 ------------------
   Hunter IDLE (no reader before this):
@@ -89,7 +124,7 @@ EXPECTED BEHAVIOUR
 
 USAGE
 -----
-    sudo python3 process_reader_phase1.py
+    python3 process_reader_phase1.py
     (enter PID of phase1_prototype.py when prompted)
 
     The reader runs for HOLD_DURATION seconds (default 30 s) while keeping
@@ -98,6 +133,8 @@ USAGE
     the reader exits.
 """
 
+import ctypes
+import ctypes.util
 import hashlib
 import json
 import os
@@ -151,6 +188,99 @@ _PROBE_SEEDS = [
 
 
 # ---------------------------------------------------------------------------
+# process_vm_readv  — same-UID cross-process read without /proc/<pid>/mem
+# ---------------------------------------------------------------------------
+#
+# process_vm_readv(2) reads from a remote process's address space directly
+# via a kernel syscall.  It requires the same privileges as ptrace (i.e.
+# same UID and ptrace_scope <= 1), but does NOT require the reader to open
+# /proc/<pid>/mem as a file — so it bypasses path-level permission checks
+# while still triggering the hunter via the /proc/<pid>/mem open() in the
+# fd-hold thread.
+#
+# We also keep the original open()+seek()+read() path as a fallback so the
+# reader still works in environments where process_vm_readv is unavailable.
+# ---------------------------------------------------------------------------
+
+_libc = None
+_process_vm_readv = None
+
+
+def _init_vm_readv() -> bool:
+    """Load libc and resolve process_vm_readv.  Returns True on success."""
+    global _libc, _process_vm_readv
+    if _process_vm_readv is not None:
+        return True
+    try:
+        libc_name = ctypes.util.find_library("c") or "libc.so.6"
+        _libc = ctypes.CDLL(libc_name, use_errno=True)
+        _process_vm_readv = _libc.process_vm_readv
+        _process_vm_readv.restype  = ctypes.c_ssize_t
+        _process_vm_readv.argtypes = [
+            ctypes.c_int,                   # pid
+            ctypes.c_void_p,                # local_iov
+            ctypes.c_ulong,                 # liovcnt
+            ctypes.c_void_p,                # remote_iov
+            ctypes.c_ulong,                 # riovcnt
+            ctypes.c_ulong,                 # flags (must be 0)
+        ]
+        return True
+    except Exception:
+        _process_vm_readv = None
+        return False
+
+
+class _Iovec(ctypes.Structure):
+    """struct iovec { void *iov_base; size_t iov_len; }"""
+    _fields_ = [
+        ("iov_base", ctypes.c_void_p),
+        ("iov_len",  ctypes.c_size_t),
+    ]
+
+
+def _vm_readv(pid: int, addr: int, size: int) -> Optional[bytes]:
+    """Read `size` bytes from `addr` in process `pid` via process_vm_readv."""
+    if not _init_vm_readv():
+        return None
+    buf = (ctypes.c_char * size)()
+    local_iov  = _Iovec(ctypes.cast(buf, ctypes.c_void_p), size)
+    remote_iov = _Iovec(ctypes.c_void_p(addr), size)
+    n = _process_vm_readv(
+        pid,
+        ctypes.byref(local_iov),  1,
+        ctypes.byref(remote_iov), 1,
+        0,
+    )
+    if n < 0:
+        return None
+    return bytes(buf[:n])
+
+
+def read_mem(pid: int, addr: int, size: int) -> Optional[bytes]:
+    """
+    Read `size` bytes from virtual address `addr` in process `pid`.
+
+    Strategy (in order):
+      1. process_vm_readv via ctypes — works same-UID without sudo as long
+         as /proc/sys/kernel/yama/ptrace_scope <= 1.  Does NOT require
+         opening /proc/<pid>/mem, so it is unaffected by file-level DAC.
+      2. Fallback: open /proc/<pid>/mem, seek, read.  Requires the same
+         UID or CAP_SYS_PTRACE (root).  Used automatically if vm_readv
+         fails (e.g. kernel < 3.2 or ptrace_scope = 2).
+    """
+    data = _vm_readv(pid, addr, size)
+    if data is not None:
+        return data
+    # Fallback: classic /proc/<pid>/mem open
+    try:
+        with open(f"/proc/{pid}/mem", "rb") as f:
+            f.seek(addr)
+            return f.read(size)
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
 # /proc helpers
 # ---------------------------------------------------------------------------
 
@@ -169,15 +299,6 @@ def list_rw_regions(pid: int) -> List[Tuple[int, int]]:
     except Exception:
         pass
     return regions
-
-
-def read_mem(pid: int, addr: int, size: int) -> Optional[bytes]:
-    try:
-        with open(f"/proc/{pid}/mem", "rb") as f:
-            f.seek(addr)
-            return f.read(size)
-    except Exception:
-        return None
 
 
 def open_mem_fd(pid: int):
@@ -301,6 +422,10 @@ class FdHoldThread:
     Purpose: give the hunter's _FdPoller (50 ms cadence) many opportunities
     to observe our open handle and trigger the hunter — independent of
     whether the anomaly score crosses the MEDIUM threshold.
+
+    Note: the keep-alive reads use the process_vm_readv path (read_mem)
+    rather than the held fd, so the fd-hold thread purely demonstrates
+    /proc/<pid>/mem presence to the hunter's inotify + fd-poller.
     """
 
     def __init__(self, pid: int, regions: List[Tuple[int, int]]):
@@ -328,6 +453,17 @@ class FdHoldThread:
         try:
             self.fd = open(f"/proc/{self._pid}/mem", "rb")
             self.opened = True
+        except PermissionError as exc:
+            print(
+                f"[fd-hold] FAILED to open /proc/{self._pid}/mem: {exc}\n"
+                f"[fd-hold] → Run both prototype and reader as the same "
+                f"non-root user.\n"
+                f"[fd-hold] → If ptrace_scope=1, either start both from "
+                f"the same shell or run:\n"
+                f"[fd-hold]     echo 0 | sudo tee "
+                f"/proc/sys/kernel/yama/ptrace_scope"
+            )
+            return
         except Exception as exc:
             print(f"[fd-hold] FAILED to open /proc/{self._pid}/mem: {exc}")
             return
@@ -337,16 +473,12 @@ class FdHoldThread:
 
         deadline = time.time() + HOLD_DURATION
         while not self._stop.is_set() and time.time() < deadline:
-            # Keep-alive read from first readable region
+            # Keep-alive read via process_vm_readv (avoids double-open noise)
             for start, end in self._regions:
                 sz = min(16, end - start)
                 if sz <= 0:
                     continue
-                try:
-                    self.fd.seek(start)
-                    self.fd.read(sz)
-                except Exception:
-                    pass
+                read_mem(self._pid, start, sz)
                 break
             self._stop.wait(timeout=HOLD_READ_INTERVAL)
 
@@ -645,6 +777,9 @@ def main():
     best_score      = -9999
     best_addr       = None
 
+    # Report which memory-read backend is available
+    vm_readv_ok = _init_vm_readv()
+
     print()
     print("=" * 72)
     print("  process_reader_phase1.py  —  Reader for phase1_prototype.py")
@@ -654,11 +789,15 @@ def main():
     print(f"  fd hold:          {HOLD_DURATION}s (hunter provocation)")
     print(f"  IPC arena size:   {IPC_ARENA_SIZE}B  ({IPC_SLOTS} slots × {IPC_FRAME_SIZE}B)")
     print(f"  EXPECTED_VER:     {EXPECTED_VER}  (structural scan — expect all REJECT)")
+    print(f"  mem read backend: {'process_vm_readv (no sudo needed)' if vm_readv_ok else 'fallback: /proc/<pid>/mem open()'}")
     print()
     print("  NOTE: Real-buffer entity layout is per-epoch random (pad_sizes +")
     print("        field_order shuffle + per-field XOR encryption).  Structural")
     print("        scanning will score ≤ +15.  Primary observable channels are")
     print("        the IPC arena and the /proc/mem fd-hold hunter provocation.")
+    print("  NOTE: Run both prototype and reader as the same non-root user.")
+    print("        If PermissionError, check /proc/sys/kernel/yama/ptrace_scope.")
+    print("        scope=0 or 1 → no sudo needed.  scope=2 → sudo required.")
     print("=" * 72)
     print()
 
@@ -796,6 +935,7 @@ def main():
     print("  ── fd-Hold / Hunter Provocation ────────────────────────────────")
     print(f"  fd hold duration:        {HOLD_DURATION}s")
     print(f"  fd hold opened:          {hold_thread.opened}")
+    print(f"  mem read backend:        {'process_vm_readv' if vm_readv_ok else '/proc/<pid>/mem fallback'}")
     print()
     print("  EXPECTED HUNTER BEHAVIOUR in phase1_prototype.py terminal:")
     print("    [hunter] fd-poller HIT: pid=<this_pid>  exe='...python...'")
