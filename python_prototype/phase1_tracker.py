@@ -15,6 +15,15 @@ Tier 1 — inotify IN_OPEN on /proc/<own_pid>/mem  (_InotifyMemWatcher)
     open() syscall has not yet returned.  This fixes the root-reader /
     non-root-prototype permission gap that defeated _FdPoller.
 
+    /proc quirk: pread64() on /proc/*/mem re-triggers IN_OPEN internally
+    on every call.  A debounce gate (_OPEN_DEBOUNCE_S = 0.10 s) coalesces
+    rapid-fire events from a single reader into one callback per burst.
+    The gate resets on IN_CLOSE so a genuine re-open is never suppressed.
+
+    When the outward /proc/*/fd scan finds nothing (reader is root, we are
+    not), the open is logged as SUSPECT(anonymous-open) with a 1 s rate
+    limit rather than flooding stdout.
+
     Falls back automatically to Tier 2 if inotify on /proc pseudofiles
     is unavailable (some containers, older kernels).
 
@@ -34,7 +43,10 @@ inotify on /proc pseudofiles works on Linux >= 3.x when the watch is
 placed on the file itself (not the directory).  The kernel delivers
 IN_OPEN because it hooks the file's ->open() VFS operation.  The event
 arrives in the watcher thread while the opener is still inside the
-open() syscall, so the outward /proc scan always finds the fd.
+open() syscall, so the outward /proc scan always finds the fd — UNLESS
+the reader is higher-privilege (root), in which case the fd directory is
+unreadable.  In that case we treat the inotify event itself as the
+detection signal and emit an anonymous-open dossier.
 
 Logging
 -------
@@ -124,50 +136,32 @@ _IN_CLOSE_NOWRITE = 0x00000010   # unwritable file closed (read-only open)
 _IN_CLOSE_WRITE   = 0x00000008   # writable file closed
 _IN_NONBLOCK      = 0x00000800   # O_NONBLOCK for inotify_init1
 
+# Debounce: coalesce rapid IN_OPEN events (pread64 flood) into one callback.
+# The gate resets on IN_CLOSE so genuine re-opens are never suppressed.
+_OPEN_DEBOUNCE_S   = 0.10   # seconds — events within this window are merged
+
+# Rate-limit for the "anonymous open" log line (root reader, scan misses).
+_ANON_LOG_COOLDOWN_S = 1.0  # seconds between repeated anonymous-open logs
+
 # inotify event struct: wd(i32) mask(u32) cookie(u32) len(u32)  [+ name[len]]
 _INOTIFY_EVENT_STRUCT = struct.Struct("iIII")
 _INOTIFY_EVENT_SIZE   = _INOTIFY_EVENT_STRUCT.size   # 16 bytes
 
 
-def _inotify_available() -> bool:
-    """True if inotify syscalls are reachable via libc on this platform."""
-    if os.name != "posix":
-        return False
-    try:
-        libc_name = ctypes.util.find_library("c") or "libc.so.6"
-        libc = ctypes.CDLL(libc_name, use_errno=True)
-        return (
-            hasattr(libc, "inotify_init1")
-            and hasattr(libc, "inotify_add_watch")
-        )
-    except Exception:
-        return False
-
-
 def _inotify_init1(flags: int = 0) -> int:
-    """
-    Call inotify_init1(flags).  Returns fd >= 0 on success, -1 on error.
-    Sets errno on failure.
-    """
     libc_name = ctypes.util.find_library("c") or "libc.so.6"
     libc = ctypes.CDLL(libc_name, use_errno=True)
-    fd = libc.inotify_init1(ctypes.c_int(flags))
-    return int(fd)
+    return int(libc.inotify_init1(ctypes.c_int(flags)))
 
 
 def _inotify_add_watch(inotify_fd: int, path: str, mask: int) -> int:
-    """
-    Call inotify_add_watch(inotify_fd, path, mask).
-    Returns watch descriptor >= 0 on success, -1 on error.
-    """
     libc_name = ctypes.util.find_library("c") or "libc.so.6"
     libc = ctypes.CDLL(libc_name, use_errno=True)
-    wd = libc.inotify_add_watch(
+    return int(libc.inotify_add_watch(
         ctypes.c_int(inotify_fd),
         path.encode(),
         ctypes.c_uint32(mask),
-    )
-    return int(wd)
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -223,23 +217,40 @@ def _open_fds_pointing_to(pid: int, target_path: str) -> List[str]:
 
 def _find_foreign_mem_handles(
     own_pid: int, mem_target: str
-) -> List[Tuple[int, List[str]]]:
+) -> Tuple[List[Tuple[int, List[str]]], bool]:
     """
-    Enumerate ALL PIDs and return (pid, [fd_paths]) for every foreign PID
-    that currently has mem_target open.  Returns [] if none found.
+    Enumerate ALL PIDs and return:
+      (hits, any_permission_denied)
 
-    NOTE: This call will silently skip PIDs whose /proc/<pid>/fd directory
-    is unreadable (e.g. root-owned processes scanned by a non-root caller).
-    Use _InotifyMemWatcher as the primary path to avoid that limitation.
+    hits                : [(pid, [fd_paths]), ...]  — foreign PIDs with mem open
+    any_permission_denied: True if at least one /proc/<pid>/fd was unreadable
+                          (indicates a higher-privilege process exists that we
+                           cannot inspect — treat inotify event as anonymous-open)
+
+    The permission_denied flag lets the caller distinguish "nobody has it open"
+    from "someone has it open but we can't see them".
     """
-    results = []
+    results: List[Tuple[int, List[str]]] = []
+    any_eperm = False
     for pid in _all_pids():
         if pid == own_pid:
             continue
-        fd_hits = _open_fds_pointing_to(pid, mem_target)
-        if fd_hits:
-            results.append((pid, fd_hits))
-    return results
+        fd_dir = f"/proc/{pid}/fd"
+        try:
+            entries = os.listdir(fd_dir)
+        except PermissionError:
+            any_eperm = True
+            continue
+        except Exception:
+            continue
+        hits = []
+        for fd_name in entries:
+            link = _resolve_link(f"{fd_dir}/{fd_name}")
+            if link == mem_target:
+                hits.append(f"{fd_dir}/{fd_name}")
+        if hits:
+            results.append((pid, hits))
+    return results, any_eperm
 
 
 def _parse_status_uid(status_text: str) -> Optional[int]:
@@ -255,7 +266,7 @@ def _parse_status_uid(status_text: str) -> Optional[int]:
 
 
 def _parse_status_gid(status_text: str) -> Optional[int]:
-    for line in status_text.splitlines():
+    for line in status_text.splitlines():\
         if line.startswith("Gid:"):
             parts = line.split()
             if len(parts) >= 2:
@@ -328,7 +339,7 @@ class Dossier:
             "uid":              self.uid,
             "gid":              self.gid,
             "loginuid":         self.loginuid,
-            "loginuid_hex":     hex(self.loginuid),
+            "loginuid_hex":     hex(self.loginuid) if self.loginuid >= 0 else "unknown",
             "environ_keys":     self.environ_keys,
             "session_type":     self.session_type,
             "first_seen_epoch": self.first_seen_epoch,
@@ -363,10 +374,6 @@ def _build_dossier(
     snapshot_exe: str = "",
     snapshot_cmdline: str = "",
 ) -> Optional["Dossier"]:
-    """
-    Build or update a Dossier.  If /proc/<pid> is already gone, fall back
-    to snapshot values captured earlier by the watcher / poller.
-    """
     status_text = _read_file(f"/proc/{pid}/status")
     proc_alive  = status_text is not None
 
@@ -401,17 +408,38 @@ def _build_dossier(
         return existing
 
     return Dossier(
-        pid=pid,
-        exe=exe,
-        cmdline=cmdline,
-        uid=uid,
-        gid=gid,
-        loginuid=loginuid,
+        pid=pid, exe=exe, cmdline=cmdline,
+        uid=uid, gid=gid, loginuid=loginuid,
         environ_keys=environ_keys,
+        first_seen_epoch=epoch, last_seen_epoch=epoch,
+        seen_count=1, session_type=session,
+    )
+
+
+def _build_anonymous_dossier(epoch: int, existing: Optional["Dossier"] = None) -> "Dossier":
+    """
+    Construct a minimal Dossier for a confirmed-but-opaque opener.
+
+    Used when inotify fires IN_OPEN but the outward /proc/*/fd scan is
+    blocked by PermissionError (reader is root, we are not).  pid=-1
+    signals "anonymous" to downstream consumers.
+    """
+    if existing is not None:
+        existing.last_seen_epoch = epoch
+        existing.seen_count     += 1
+        return existing
+    return Dossier(
+        pid=-1,
+        exe="(anonymous-opener — higher-privilege process, fd unreadable)",
+        cmdline="",
+        uid=-1,
+        gid=-1,
+        loginuid=0xFFFFFFFF,
+        environ_keys=[],
         first_seen_epoch=epoch,
         last_seen_epoch=epoch,
         seen_count=1,
-        session_type=session,
+        session_type="unknown-elevated",
     )
 
 
@@ -465,11 +493,6 @@ class _FdSnapshot:
 # ---------------------------------------------------------------------------
 
 class _HunterLogger:
-    """
-    Thread-safe logger: writes every [hunter] message to stdout AND a
-    timestamped .log file.
-    """
-
     def __init__(self, log_path: Optional[str]):
         self.log_path = log_path
         self._fh: Optional[Any] = None
@@ -523,7 +546,6 @@ def _make_log_path(cfg: HunterConfig) -> Optional[str]:
         return None
     else:
         base_dir = cfg.log_dir
-
     ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
     pid = os.getpid()
     return os.path.join(base_dir, f"hunter_suspects_{pid}_{ts}.log")
@@ -535,56 +557,46 @@ def _make_log_path(cfg: HunterConfig) -> Optional[str]:
 
 class _InotifyMemWatcher:
     """
-    Daemon thread that watches /proc/<own_pid>/mem for IN_OPEN events via
-    Linux inotify(7).
+    Daemon thread: watches /proc/<own_pid>/mem for IN_OPEN via inotify(7).
 
-    Why inotify beats _FdPoller for cross-UID readers
-    --------------------------------------------------
-    _FdPoller scans /proc/<reader_pid>/fd outward — but if the reader runs
-    as root and the prototype runs as a normal user, os.listdir() on the
-    reader's fd directory raises PermissionError and the hit is missed.
+    pread64 flood fix
+    -----------------
+    /proc/*/mem re-triggers IN_OPEN on every pread64() call, not just the
+    initial open().  _last_open_ts + _OPEN_DEBOUNCE_S coalesces a burst of
+    events from one reader session into a single on_open() callback.
+    _last_open_ts is reset to 0.0 on every IN_CLOSE event so a genuine
+    re-open after close is never suppressed.
 
-    inotify watches are placed on the INODE of /proc/<own_pid>/mem.  The
-    kernel delivers IN_OPEN the moment ANY process — root or otherwise —
-    calls open() on that path.  Crucially, the event arrives while the
-    opener is still inside the open() syscall, so by the time we perform
-    the outward /proc scan the reader's fd is guaranteed live.
-
-    The race that defeated _FdPoller is gone.
-
-    Event loop
-    ----------
-    1. inotify_init1(IN_NONBLOCK) → inotify_fd
-    2. inotify_add_watch(inotify_fd, mem_path, IN_OPEN | IN_CLOSE_NOWRITE)
-    3. select() with 1 s timeout (so stop_event is checked regularly)
-    4. On readable: read all pending 16-byte event structs
-    5. For each IN_OPEN event: call on_open(epoch) callback immediately
-       (no pid from inotify — the callback does the outward scan itself)
-
-    Availability
-    ------------
-    Falls back gracefully: if inotify_init1 fails (container, old kernel,
-    non-Linux) self.available = False and ObserverHunter uses _FdPoller.
+    Anonymous-open handling
+    -----------------------
+    When the outward scan returns ([], any_eperm=True) the opener is a
+    higher-privilege process whose /proc/<pid>/fd is unreadable.  The
+    watcher sets self.last_open_was_anonymous = True so ObserverHunter can
+    emit an anonymous-open dossier instead of logging a misleading "no fd"
+    message.
     """
 
     def __init__(
         self,
         mem_path:   str,
-        on_open,            # callable(epoch: int) — fired on IN_OPEN
+        on_open,            # callable(epoch: int, anonymous: bool)
         stop_event: threading.Event,
-        get_epoch,          # callable() -> int — current epoch
+        get_epoch,          # callable() -> int
     ):
-        self._mem_path   = mem_path
-        self._on_open    = on_open
-        self._stop       = stop_event
-        self._get_epoch  = get_epoch
-        self._inotify_fd = -1
-        self._watch_wd   = -1
-        self._thread     = threading.Thread(
+        self._mem_path  = mem_path
+        self._on_open   = on_open
+        self._stop      = stop_event
+        self._get_epoch = get_epoch
+
+        self._inotify_fd  = -1
+        self._watch_wd    = -1
+        self._last_open_ts: float = 0.0   # debounce gate
+        self._thread = threading.Thread(
             target=self._run, daemon=True, name="inotify-mem-watcher")
 
         self.available:    bool = False
-        self.open_events:  int  = 0
+        self.open_events:  int  = 0   # total raw IN_OPEN events received
+        self.open_fired:   int  = 0   # callbacks actually dispatched (post-debounce)
         self.close_events: int  = 0
 
         self._setup()
@@ -622,15 +634,12 @@ class _InotifyMemWatcher:
     def _run(self) -> None:
         buf = bytearray(4096)
         while not self._stop.is_set():
-            # select() with 1 s timeout so we check stop_event regularly
             try:
                 r, _, _ = select.select([self._inotify_fd], [], [], 1.0)
             except Exception:
                 break
-
             if not r:
                 continue
-
             try:
                 n = os.read(self._inotify_fd, len(buf))
             except OSError:
@@ -643,11 +652,24 @@ class _InotifyMemWatcher:
 
                 if mask & _IN_OPEN:
                     self.open_events += 1
+                    now = time.monotonic()
+                    # Debounce: skip if within the gate window
+                    if now - self._last_open_ts < _OPEN_DEBOUNCE_S:
+                        continue
+                    self._last_open_ts = now
+                    self.open_fired   += 1
                     epoch = self._get_epoch()
-                    self._on_open(epoch)
+                    # Outward scan — check for permission-denied
+                    hits, any_eperm = _find_foreign_mem_handles(
+                        os.getpid(), self._mem_path
+                    )
+                    anonymous = (not hits) and any_eperm
+                    self._on_open(epoch, anonymous, hits)
 
                 if mask & (_IN_CLOSE_NOWRITE | _IN_CLOSE_WRITE):
                     self.close_events += 1
+                    # Reset debounce gate — next open after close is genuine
+                    self._last_open_ts = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +717,7 @@ class _FdPoller:
             if self._stop.is_set():
                 break
             self.poll_count += 1
-            hits = _find_foreign_mem_handles(self._own_pid, self._mem_target)
+            hits, _ = _find_foreign_mem_handles(self._own_pid, self._mem_target)
             for pid, fd_hits in hits:
                 self.hit_count += 1
                 exe     = _read_exe(pid)
@@ -713,19 +735,15 @@ class ObserverHunter:
 
     Wake paths
     ----------
-    A. inotify IN_OPEN  : _InotifyMemWatcher fires on_open(); we scan
-                          /proc/*/fd immediately while reader fd is live.
-                          Works even when reader is root.  [PRIMARY]
-    B. Score-based      : score >= trigger_score in notify_score().
-    C. Epoch fd poll    : notify_score() finds handle open right now.
-    D. _FdPoller hit    : fallback when inotify unavailable.
-
-    Startup sequence
-    ----------------
-    1. Try to start _InotifyMemWatcher.
-    2. If watcher.available → use it as primary, skip _FdPoller.
-    3. If not available → log a warning and start _FdPoller as fallback.
+    A. inotify IN_OPEN (named)    : reader found in /proc — enqueue snapshot.
+    B. inotify IN_OPEN (anonymous): reader is root/elevated — emit anon dossier.
+    C. Score-based                : score >= trigger_score in notify_score().
+    D. Epoch fd poll              : notify_score() finds handle open right now.
+    E. _FdPoller hit              : fallback when inotify unavailable.
     """
+
+    # Sentinel key for the anonymous-opener dossier in self._dossiers
+    _ANON_KEY = -1
 
     def __init__(self, cfg: HunterConfig, arena, tpm_seed: bytes):
         self._cfg        = cfg
@@ -750,11 +768,15 @@ class ObserverHunter:
         self._thread     = threading.Thread(
             target=self._run, daemon=True, name="observer-hunter")
 
-        self.total_suspects_found: int = 0
-        self.total_scans:          int = 0
-        self.trigger_count:        int = 0
-        self.watcher_hit_count:    int = 0   # hits from inotify watcher
-        self.poller_hit_count:     int = 0   # hits from fallback poller
+        self.total_suspects_found:  int = 0
+        self.total_scans:           int = 0
+        self.trigger_count:         int = 0
+        self.watcher_hit_count:     int = 0
+        self.watcher_anon_count:    int = 0   # anonymous-open events logged
+        self.poller_hit_count:      int = 0
+
+        # Rate-limit for anonymous-open log line
+        self._last_anon_log_ts: float = 0.0
 
         # Logger
         log_path      = _make_log_path(cfg)
@@ -769,7 +791,7 @@ class ObserverHunter:
             get_epoch  = lambda: self._current_epoch,
         )
 
-        # Tier 2 — fallback poller (only used when watcher unavailable)
+        # Tier 2 — fallback poller (only started when watcher unavailable)
         self._poller = _FdPoller(
             own_pid    = self._own_pid,
             mem_target = self._mem_target,
@@ -786,51 +808,76 @@ class ObserverHunter:
         self._logger.log(msg)
 
     # ------------------------------------------------------------------
-    # inotify callback  (called from _InotifyMemWatcher thread on IN_OPEN)
+    # inotify callback  — called from _InotifyMemWatcher._run()
     # ------------------------------------------------------------------
 
-    def _on_inotify_open(self, epoch: int) -> None:
+    def _on_inotify_open(
+        self,
+        epoch: int,
+        anonymous: bool,
+        hits: List[Tuple[int, List[str]]],
+    ) -> None:
         """
-        Fired by _InotifyMemWatcher the moment any process opens our mem
-        file.  At this point the reader is still inside open() so its fd
-        is guaranteed live — scan immediately.
-        """
-        # Outward scan: now guaranteed to find the reader
-        hits = _find_foreign_mem_handles(self._own_pid, self._mem_target)
+        Three outcomes:
 
-        if not hits:
-            # Highly unusual — the opener may have been ourselves or the
-            # fd was closed before we got scheduled.  Log and wake anyway.
-            self._hlog(
-                f"[hunter] inotify IN_OPEN at epoch={epoch} "
-                f"but outward scan found no foreign fd "
-                f"(reader closed before scan — epoch boundary snap)"
-            )
-            # Still wake the hunter so a live-scan pass runs
-            with self._lock:
-                if not self._active:
-                    self._active    = True
-                    self._low_count = 0
-                    self.trigger_count += 1
+        (a) hits non-empty  → named reader found; enqueue snapshot normally.
+        (b) anonymous=True  → reader exists but is higher-privilege; emit
+                              anonymous-open dossier with 1 s rate-limit log.
+        (c) hits empty, anonymous=False → self-open or kernel artefact;
+                              silent (no log, no wake).
+        """
+        if hits:
+            # (a) Named hit
+            for pid, fd_hits in hits:
+                exe     = _read_exe(pid)
+                cmdline = _read_cmdline(pid)
+                enqueued = self._enqueue_snapshot(
+                    pid, fd_hits, exe, cmdline, epoch, source="inotify"
+                )
+                if enqueued:
+                    self.watcher_hit_count += 1
                     self._hlog(
-                        f"[hunter] TRIGGERED at epoch={epoch}"
-                        f"  reason=[inotify-open-no-fd]  initiating scan"
+                        f"[hunter] inotify HIT: pid={pid}  exe={exe!r}"
+                        f"  fd_hits={fd_hits}  epoch={epoch}"
                     )
-                    self._wake_event.set()
             return
 
-        for pid, fd_hits in hits:
-            exe     = _read_exe(pid)
-            cmdline = _read_cmdline(pid)
-            enqueued = self._enqueue_snapshot(
-                pid, fd_hits, exe, cmdline, epoch, source="inotify"
-            )
-            if enqueued:
-                self.watcher_hit_count += 1
+        if anonymous:
+            # (b) Anonymous open — higher-privilege opener
+            self.watcher_anon_count += 1
+            now = time.monotonic()
+            if now - self._last_anon_log_ts >= _ANON_LOG_COOLDOWN_S:
+                self._last_anon_log_ts = now
                 self._hlog(
-                    f"[hunter] inotify HIT: pid={pid}  exe={exe!r}"
-                    f"  fd_hits={fd_hits}  epoch={epoch}"
+                    f"[hunter] inotify ANONYMOUS-OPEN at epoch={epoch}"
+                    f"  (opener is higher-privilege; /proc/*/fd unreadable)"
+                    f"  total_anon={self.watcher_anon_count}"
                 )
+                # Build / update anonymous dossier
+                existing = self._dossiers.get(self._ANON_KEY)
+                dossier  = _build_anonymous_dossier(epoch, existing)
+                self._dossiers[self._ANON_KEY]   = dossier
+                self._dossier_ts[self._ANON_KEY] = time.time()
+                self.total_suspects_found += 1
+
+                self._hlog(f"[hunter] SUSPECT (anonymous-open) → {dossier.summary()}")
+                _emit_dossier(
+                    self._arena, self._tpm_seed,
+                    self._packet_id, dossier,
+                    slot=self._cfg.ipc_slot,
+                )
+                self._packet_id += 1
+
+                # Wake the hunter for its active-scan pass
+                with self._lock:
+                    if not self._active:
+                        self._active    = True
+                        self._low_count = 0
+                        self.trigger_count += 1
+                        self._wake_event.set()
+            return
+
+        # (c) Self-open / kernel artefact — silent
 
     # ------------------------------------------------------------------
     # Fallback poller callback
@@ -870,8 +917,7 @@ class ObserverHunter:
             self._seen_snap_keys.add(key)
             snap = _FdSnapshot(
                 pid=pid, fd_hits=fd_hits,
-                exe=exe, cmdline=cmdline,
-                epoch=epoch,
+                exe=exe, cmdline=cmdline, epoch=epoch,
             )
             self._pending_fd_hits.append(snap)
 
@@ -902,10 +948,11 @@ class ObserverHunter:
                 f" (trigger_score={self._cfg.trigger_score:.2f}"
                 f", hunter_interval={self._cfg.hunter_interval}s"
                 f", detection=inotify-IN_OPEN [Tier 1]"
+                f", debounce={_OPEN_DEBOUNCE_S}s"
+                f", anon_cooldown={_ANON_LOG_COOLDOWN_S}s"
                 f", log={self.log_path or 'disabled'})"
             )
         else:
-            # inotify unavailable — warn and fall back to poller
             self._hlog(
                 "[hunter] WARNING: inotify on /proc/mem unavailable"
                 " — falling back to _FdPoller (Tier 2)."
@@ -933,15 +980,15 @@ class ObserverHunter:
         """
         Called from the game loop each epoch.
 
-        1. Update current epoch (used by watcher callback for labelling).
-        2. Belt-and-suspenders fd poll (Tier 3 — catches persistent readers).
+        1. Update current epoch.
+        2. Tier 3 belt-and-suspenders fd poll.
         3. Wake/idle hunter based on score or direct hit.
         """
         with self._lock:
             self._current_epoch = epoch
 
         # Tier 3: epoch-boundary fd poll
-        live_hits = _find_foreign_mem_handles(self._own_pid, self._mem_target)
+        live_hits, _ = _find_foreign_mem_handles(self._own_pid, self._mem_target)
         for pid, fd_hits in live_hits:
             exe     = _read_exe(pid)
             cmdline = _read_cmdline(pid)
@@ -992,31 +1039,22 @@ class ObserverHunter:
         while not self._stop_event.is_set():
             self._wake_event.wait()
             self._wake_event.clear()
-
             if self._stop_event.is_set():
                 break
-
             while not self._stop_event.is_set():
                 with self._lock:
                     active = self._active
                     epoch  = self._current_epoch
-
                 if not active:
                     break
-
                 self._scan(epoch)
                 self._stop_event.wait(timeout=self._cfg.hunter_interval)
 
     def _scan(self, epoch: int) -> None:
-        """
-        Two-phase detection:
-          Phase A — drain pending snapshots (from inotify / poller).
-          Phase B — live /proc/*/fd scan for persistent readers.
-        """
         self.total_scans += 1
         now = time.time()
 
-        # ---- Phase A: drain snapshot queue ----
+        # Phase A: drain snapshot queue
         with self._lock:
             pending = list(self._pending_fd_hits)
             self._pending_fd_hits.clear()
@@ -1029,7 +1067,6 @@ class ObserverHunter:
             pid = snap.pid
             reported_pids.add(pid)
             self.total_suspects_found += 1
-
             existing = self._dossiers.get(pid)
             dossier  = _build_dossier(
                 pid, snap.epoch, existing,
@@ -1038,15 +1075,12 @@ class ObserverHunter:
             )
             if dossier is None:
                 continue
-
             self._dossiers[pid]   = dossier
             self._dossier_ts[pid] = now
-
             self._hlog(f"[hunter] SUSPECT (snapshot) → {dossier.summary()}")
             self._hlog(f"[hunter]   fd_hits={snap.fd_hits}")
             if dossier.environ_keys:
                 self._hlog(f"[hunter]   environ_keys={dossier.environ_keys}")
-
             _emit_dossier(
                 self._arena, self._tpm_seed,
                 self._packet_id, dossier,
@@ -1054,7 +1088,7 @@ class ObserverHunter:
             )
             self._packet_id += 1
 
-        # ---- Phase B: live scan for persistent readers ----
+        # Phase B: live scan for persistent readers
         live_found = []
         for pid in _all_pids():
             if pid == self._own_pid or pid in reported_pids:
@@ -1069,15 +1103,12 @@ class ObserverHunter:
             dossier  = _build_dossier(pid, epoch, existing)
             if dossier is None:
                 continue
-
             self._dossiers[pid]   = dossier
             self._dossier_ts[pid] = now
-
             self._hlog(f"[hunter] SUSPECT (live) → {dossier.summary()}")
             self._hlog(f"[hunter]   fd_hits={fd_hits}")
             if dossier.environ_keys:
                 self._hlog(f"[hunter]   environ_keys={dossier.environ_keys}")
-
             _emit_dossier(
                 self._arena, self._tpm_seed,
                 self._packet_id, dossier,
@@ -1110,9 +1141,11 @@ class ObserverHunter:
         if self._watcher.available:
             detection_line = (
                 f"  HUNTER_DETECTION:      inotify-IN_OPEN (Tier 1)"
-                f"  open_events={self._watcher.open_events}"
+                f"  raw_events={self._watcher.open_events}"
+                f"  fired={self._watcher.open_fired}"
                 f"  close_events={self._watcher.close_events}"
-                f"  watcher_hits={self.watcher_hit_count}"
+                f"  named_hits={self.watcher_hit_count}"
+                f"  anon_hits={self.watcher_anon_count}"
             )
         else:
             detection_line = (
