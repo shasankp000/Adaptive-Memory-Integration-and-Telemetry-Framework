@@ -632,7 +632,7 @@ class DossierProbe:
 # ---------------------------------------------------------------------------
 
 def main():
-    pid = int(input("Enter target process PID (phase1_prototype.py): ").strip()
+    pid = int(input("Enter target process PID (phase1_prototype.py): ").strip())
 
     regions     = list_rw_regions(pid)
     block_size  = HEADER_SIZE + EXPECTED_CNT * ENTITY_SIZE
