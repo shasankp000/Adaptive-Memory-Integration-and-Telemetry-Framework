@@ -446,6 +446,9 @@ def _read_exe(pid: int) -> str:
 # Attribution dossier
 # ---------------------------------------------------------------------------
 
+_CMDLINE_MAX_SUMMARY = 120   # characters shown in summary() / log lines
+
+
 @dataclass
 class Dossier:
     pid:              int
@@ -477,8 +480,13 @@ class Dossier:
         }
 
     def summary(self) -> str:
+        # Truncate cmdline so log lines stay readable; full value is in to_dict()
+        cmdline_display = self.cmdline
+        if len(cmdline_display) > _CMDLINE_MAX_SUMMARY:
+            cmdline_display = cmdline_display[:_CMDLINE_MAX_SUMMARY] + "..."
         return (
-            f"pid={self.pid}  exe={self.exe!r}  loginuid={self.loginuid}"
+            f"pid={self.pid}  exe={self.exe!r}  cmdline={cmdline_display!r}"
+            f"  loginuid={self.loginuid}"
             f"  session={self.session_type}  seen={self.seen_count}x"
             f"  epochs=[{self.first_seen_epoch},{self.last_seen_epoch}]"
         )
