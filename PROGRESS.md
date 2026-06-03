@@ -506,11 +506,85 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 | Phase | Description | Status |
 |-------|-------------|:------:|
 | Phase 0 — Simulation & Research | Validate architectural feasibility, synthetic memory simulator | ✅ Complete |
-| Phase 1 — Telemetry Prototype | Handle tracker, polling detector, page-access logging, anomaly scoring | ⬜ |
+| Phase 1 — Telemetry Prototype | Handle tracker, polling detector, page-access logging, anomaly scoring | 🔄 In Progress |
 | Phase 2 — Runtime Fragmentation Prototype | Randomized allocator, indirect pointer layer, epoch rotation | ⬜ |
 | Phase 3 — GPU-Assisted Pipeline | Async GPU transforms, batched encryption, epoch migration | ⬜ |
 | Phase 4 — Integrated Telemetry + Memory Defense | Suspicious read-pattern scoring, correlation engine | ⬜ |
 | Phase 5 — Controlled Red-Team Testing | Synthetic polling frameworks, semantic reconstruction attempts | ⬜ |
+
+---
+
+## Phase 1 — Telemetry Prototype Progress
+
+### Overview
+
+Phase 1 implements the **ObserverHunter** — a live daemon that detects, identifies, and tracks
+external processes attempting to read the game process's memory via `/proc/<pid>/mem`. The prototype
+lives in `python_prototype/phase1_prototype.py` (game loop) and `python_prototype/phase1_tracker.py`
+(hunter daemon), with `process_reader_phase1.py` as the simulated adversary.
+
+### Implementation Status
+
+| Component | Description | Status |
+|-----------|-------------|:------:|
+| `ObserverHunter` daemon | inotify `IN_OPEN` watcher on `/proc/<pid>/mem` with configurable scan interval | ✅ |
+| Tier 1 detection — inotify | Watches for any process opening `/proc/<pid>/mem`; fires within the kernel's inotify latency (~1 ms) | ✅ |
+| Tier 2 detection — `process_vm_readv` poll | Polls `SYS_process_vm_readv` (syscall 310) to detect DMA-style reads that bypass `/proc/mem` | ✅ |
+| `_FdSnapshot` — PID capture at open-time | inotify callback snapshots opener PID + cmdline immediately at `IN_OPEN` before the process can exit | ✅ |
+| `_find_foreign_mem_handles()` | Scans all `/proc/*/fd` to find live file descriptors pointing at `/proc/<pid>/mem` | ✅ |
+| `Dossier` — suspect record | Tracks `pid`, `exe`, `cmdline`, `loginuid`, `session_type`, `seen_count`, `first_seen_epoch`, `last_seen_epoch` | ✅ |
+| `Dossier.summary()` — cmdline display | `cmdline` field surfaced in human-readable log line, truncated to 120 chars | ✅ |
+| Anonymous-opener path | Graceful handling when opener is a higher-privilege (root) process — logs anonymous dossier with `pid=-1` | ✅ |
+| Debounce + anon cooldown | `debounce=0.1s`, `anon_cooldown=1.0s` — prevents log spam from repeated inotify events | ✅ |
+| Trigger score system | Score threshold (`trigger_score=0.01`) gates scan initiation; XOR-rekey events contribute 0.5 | ✅ |
+| Suspect log file | Hunter writes structured log to `hunter_suspects_<pid>_<timestamp>.log` alongside game output | ✅ |
+| IPC JSON payload | `Dossier.to_dict()` emits JSON-serialisable record for downstream telemetry pipeline integration | ✅ |
+
+### Validation — 2026-06-03
+
+**Test run: PID 277591 (phase1_prototype.py) + PID 277315 (process_reader_phase1.py), same user (loginuid=1000)**
+
+- **ObserverHunter started** — `trigger_score=0.01`, `hunter_interval=0.3s`, inotify Tier 1 active,
+  Tier 2 `vm_readv` poll active on `SYS_process_vm_readv=310 arch=x86_64`.
+- **Trigger fired at epoch 1** (score=0.5000 ≥ 0.01) — XOR-rekey event correctly scored.
+- **Scans 1–13 (epochs 1–3)**: `snapshot=0, live=0, vm_readv_hits=0` — reader not yet attached.
+  Hunter polling before reader launch; no false positives.
+- **First detection at epoch 4 scan ~14** (18:33:18.232):
+  `SUSPECT (snapshot) → pid=277315  exe='/usr/bin/python3.14'  cmdline='python process_reader_phase1.py'  loginuid=1000  session=python-venv  seen=1x  epochs=[4,4]`
+- **Persistent tracking confirmed**: suspect dossier updated every scan (≈0.3s cadence) from `seen=1x`
+  through `seen=60x` across epochs 4–19. `first_seen_epoch=4` held constant; `last_seen_epoch`
+  incremented with each new epoch boundary crossing.
+- **`cmdline` correctly resolved**: `/proc/277315/cmdline` NUL-byte split yielded `'python process_reader_phase1.py'` —
+  confirms cmdline feature implementation (commit `153946b`) working end-to-end.
+- **No false positives**: only one suspect dossier created across the entire run. No unrelated system
+  processes incorrectly flagged.
+- **`session=python-venv`** correctly derived from process environment — session classification working.
+- **`vm_readv_hits=0`** throughout — `process_reader_phase1.py` uses `/proc/mem` exclusively; Tier 2
+  path correctly dormant.
+
+### Key Design Observations
+
+- **Snapshot path (`SUSPECT (snapshot)`) is the primary detection mechanism**: the inotify callback
+  captures the reader PID at open-time via `_FdSnapshot`, surviving even if the reader closes its
+  `/proc/mem` handle before the next 0.3s scan fires.
+- **Privilege boundary**: when the reader runs as root (higher privilege than the prototype), the
+  hunter falls back to the anonymous-opener path (`pid=-1`, `loginuid=4294967295`). Running both
+  prototype and reader as the **same non-root user** is the correct test configuration for named detection.
+- **Trigger score and detection are correctly decoupled**: the trigger at epoch 1 fires from the
+  XOR-rekey event, not from the reader. The reader only appears at epoch 4. This confirms the scoring
+  system does not produce false-positive detection events from internal game activity.
+- **13 empty scans before first detection** are expected — the reader was launched after the prototype
+  started. In a real deployment the reader would typically be running before or at game launch.
+
+### Remaining Phase 1 Work
+
+| Task | Status |
+|------|:------:|
+| Tier 2 `process_vm_readv` live adversary validation (reader using `vm_readv` syscall directly) | ⬜ |
+| Multi-suspect tracking (two concurrent readers, independent dossiers) | ⬜ |
+| Dossier persistence across hunter restarts (serialise/deserialise JSON suspect log) | ⬜ |
+| Server-side telemetry sink integration (feed `to_dict()` JSON to anomaly scoring pipeline) | ⬜ |
+| Port hunter daemon to Rust / C++ for Phase 1 production target | ⬜ |
 
 ---
 
@@ -525,4 +599,4 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 
 ---
 
-*Last updated: v12 validated. Full integration confirmed — all 11 layers simultaneously active, reader v2 post-loop precision = 0%, reader v5 concurrent precision = 0%, `memfd` arena invisible to Attack A mmap scan. Phase 0 prototype roadmap COMPLETE. Next: Phase 1 — Telemetry Prototype (Rust / C++).*
+*Last updated: 2026-06-03. Phase 1 telemetry prototype — ObserverHunter inotify/vm_readv daemon implemented and validated. Named suspect detection confirmed working: `process_reader_phase1.py` correctly identified by PID, exe, cmdline, loginuid, and session across 60 consecutive detections spanning epochs 4–19. Phase 0 complete. Phase 1 in progress.*
