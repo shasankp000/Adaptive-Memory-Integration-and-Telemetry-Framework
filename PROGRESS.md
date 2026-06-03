@@ -1,4 +1,4 @@
-# AMITF — Prototype Progress Checklist
+# AMITF -- Prototype Progress Checklist
 
 Tracks implementation and validation status of the prototype evolution stages
 defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.md`.
@@ -9,19 +9,19 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 | Stage | Description | Implemented | Validated |
 |-------|-------------|:-----------:|:---------:|
-| **v0** | Stable readable state — packed ctypes structs, double-buffered register | ✅ | ✅ |
-| **v1** | Fragmented layout — random noise padding between every entity field, new layout every epoch | ✅ | ✅ |
-| **v2** | Randomized field ordering — shuffle which of name/x/y comes first each epoch | ✅ | ✅ |
-| **v3** | Decoy structures — fake entity registers with valid magic headers and plausible coordinates | ✅ | ✅ |
-| **v4** | Epoch relocation — move structs to new heap addresses each epoch, invalidate old pointers | ✅ | ✅ |
-| **v5** | Short-lived coherence windows — plaintext exists only briefly before overwrite | ✅ | ✅ |
-| **v6** | Polling telemetry tracking — detect and fingerprint observation cadence | ✅ | ✅ |
-| **v7** | Adaptive semantic poisoning — respond to detected polling with increased decoy density | ✅ | ✅ |
-| **v8** | Smarter reader + anomaly scoring — upgrade reader with heuristic filters, add suspicion score output to prototype | ✅ | ✅ |
-| **v9** | Encryption epoch system — per-epoch TPM-seeded XOR/SHAKE-256 key derivation, real payload fields encrypted at write, decoys carry plausible encrypted garbage | ✅ | ✅ |
-| **v10** | Polymorphic execution layer — integrate `secure_core.c` mprotect/RWX pipeline; key derivation and reconstruction logic executes from anonymous pages, overwritten after use | ✅ | ✅ |
-| **v11** | Secure IPC bridge — integrate `secure_ipc.c` memfd/unnamed-mapping anonymous arena; per-packet SHAKE-256 rotating XOR masks on telemetry stream between prototype and reader | ✅ | ✅ |
-| **v12** | Full integration — encryption + polymorphic exec + secure IPC + anomaly scoring all active simultaneously; run reader v2 again and measure residual precision | ✅ | ✅ |
+| **v0** | Stable readable state -- packed ctypes structs, double-buffered register | ✅ | ✅ |
+| **v1** | Fragmented layout -- random noise padding between every entity field, new layout every epoch | ✅ | ✅ |
+| **v2** | Randomized field ordering -- shuffle which of name/x/y comes first each epoch | ✅ | ✅ |
+| **v3** | Decoy structures -- fake entity registers with valid magic headers and plausible coordinates | ✅ | ✅ |
+| **v4** | Epoch relocation -- move structs to new heap addresses each epoch, invalidate old pointers | ✅ | ✅ |
+| **v5** | Short-lived coherence windows -- plaintext exists only briefly before overwrite | ✅ | ✅ |
+| **v6** | Polling telemetry tracking -- detect and fingerprint observation cadence | ✅ | ✅ |
+| **v7** | Adaptive semantic poisoning -- respond to detected polling with increased decoy density | ✅ | ✅ |
+| **v8** | Smarter reader + anomaly scoring -- upgrade reader with heuristic filters, add suspicion score output to prototype | ✅ | ✅ |
+| **v9** | Encryption epoch system -- per-epoch TPM-seeded XOR/SHAKE-256 key derivation, real payload fields encrypted at write, decoys carry plausible encrypted garbage | ✅ | ✅ |
+| **v10** | Polymorphic execution layer -- integrate `secure_core.c` mprotect/RWX pipeline; key derivation and reconstruction logic executes from anonymous pages, overwritten after use | ✅ | ✅ |
+| **v11** | Secure IPC bridge -- integrate `secure_ipc.c` memfd/unnamed-mapping anonymous arena; per-packet SHAKE-256 rotating XOR masks on telemetry stream between prototype and reader | ✅ | ✅ |
+| **v12** | Full integration -- encryption + polymorphic exec + secure IPC + anomaly scoring all active simultaneously; run reader v2 again and measure residual precision | ✅ | ✅ |
 
 ---
 
@@ -32,20 +32,20 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 | Reader: filter to `rw-p` regions only (drop `r--p`, `r-xp`) | ✅ |
 | Reader: tighten count validation to exact `EXPECTED_COUNT` match | ✅ |
 | Reader: tight `block_size` = `HEADER_SIZE + EXPECTED_COUNT * ENTITY_SIZE` | ✅ |
-| Concurrent run confirmed — epoch increments observed live across passes | ✅ |
+| Concurrent run confirmed -- epoch increments observed live across passes | ✅ |
 | Double-buffering swap observable by external reader | ✅ |
-| v1 reader confirmed broken — garbage names and coordinates across all passes | ✅ |
-| v2 reader confirmed blind — 20/20 passes returned "No struct found" | ✅ |
-| v3 reader confirmed poisoned — 6–7 hits/pass, zero real, confidence at noise floor | ✅ |
-| v4 reader confirmed churning — address set unstable every pass, real buffer never found | ✅ |
-| v5 reader confirmed too slow — 30/30 scrubs completed, no real buffer observed | ✅ |
-| v6 telemetry confirmed — 60 hits / 30 epochs, mean delta converged to ~493 ms | ✅ |
-| v7 adaptive poisoning confirmed — poison triggered at epoch 1, decoys 4→12, held for full run | ✅ |
-| v8 smarter reader confirmed — heuristics work on noise but fail to disambiguate real from decoys | ✅ |
-| v9 encryption layer — reader v3 decodes only garbage from ALL candidates; content-valid = 0/N | ✅ |
-| v10 polymorphic exec — key derivation page destroyed every epoch; reader v4 timing-inference yields 0 content-valid reads | ✅ |
-| v11 IPC bridge — `memfd` arena live at `0x7f35427f6570`; 30/30 packets sent with `readback=[OK]`; reader v5 Attack B yields 0 content-valid frames, Attack C yields 0 plausible delta frames; structural score ceiling capped at 15/55 | ✅ |
-| v12 integration — reader v2 post-loop precision = 0%; reader v5 concurrent precision = 0%; `memfd` arena invisible to Attack A mmap scan; Phase 0 residual measurement CONFIRMED | ✅ |
+| v1 reader confirmed broken -- garbage names and coordinates across all passes | ✅ |
+| v2 reader confirmed blind -- 20/20 passes returned "No struct found" | ✅ |
+| v3 reader confirmed poisoned -- 6–7 hits/pass, zero real, confidence at noise floor | ✅ |
+| v4 reader confirmed churning -- address set unstable every pass, real buffer never found | ✅ |
+| v5 reader confirmed too slow -- 30/30 scrubs completed, no real buffer observed | ✅ |
+| v6 telemetry confirmed -- 60 hits / 30 epochs, mean delta converged to ~493 ms | ✅ |
+| v7 adaptive poisoning confirmed -- poison triggered at epoch 1, decoys 4→12, held for full run | ✅ |
+| v8 smarter reader confirmed -- heuristics work on noise but fail to disambiguate real from decoys | ✅ |
+| v9 encryption layer -- reader v3 decodes only garbage from ALL candidates; content-valid = 0/N | ✅ |
+| v10 polymorphic exec -- key derivation page destroyed every epoch; reader v4 timing-inference yields 0 content-valid reads | ✅ |
+| v11 IPC bridge -- `memfd` arena live at `0x7f35427f6570`; 30/30 packets sent with `readback=[OK]`; reader v5 Attack B yields 0 content-valid frames, Attack C yields 0 plausible delta frames; structural score ceiling capped at 15/55 | ✅ |
+| v12 integration -- reader v2 post-loop precision = 0%; reader v5 concurrent precision = 0%; `memfd` arena invisible to Attack A mmap scan; Phase 0 residual measurement CONFIRMED | ✅ |
 
 ---
 
@@ -61,12 +61,12 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 ## v1 Validation Notes
 
 - Target buffer size varies per epoch: observed range **79B – 117B** (baseline packed = 52B).
-- Pad sizes regenerated every epoch via `random_pad_sizes()` — 6 values in `[1, 16]`.
+- Pad sizes regenerated every epoch via `random_pad_sizes()` -- 6 values in `[1, 16]`.
 - Reader decoded garbage names every pass: `w}5`, `Eg&k`, `=Kh`, `ǹU*B/`, `KP8CT1`, `G*`, `84ܚe`, `jCT1`, etc.
 - Reader decoded garbage coordinates every pass: values like `-496974367`, `1135898192`, `-1810616955`.
 - **Partial name leakage observed** (`KP8CT1`, `:GCT1`, `jCT1`) when leading pad is short enough that
-  the 8-byte name slice partially overlaps the real name bytes. Known v1 limitation — addressed by v2.
-- Reader never produced "No struct found" — magic header and count field at fixed positions meant
+  the 8-byte name slice partially overlaps the real name bytes. Known v1 limitation -- addressed by v2.
+- Reader never produced "No struct found" -- magic header and count field at fixed positions meant
   `decode_register` always passed the size check. Magic anchor confirmed as reader's only foothold.
 
 ---
@@ -79,7 +79,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 - Field order shuffled every epoch across all 6 permutations of `[name, x, y]`:
   observed `['x','name','y']`, `['y','name','x']`, `['name','y','x']`, `['x','y','name']`, etc.
 - **Compounding effect**: v1 padding alone left the reader finding garbage structs. Adding v2 field
-  shuffle collapsed `decode_register` entirely — the two layers multiply rather than add.
+  shuffle collapsed `decode_register` entirely -- the two layers multiply rather than add.
 - The variable geometry means the reader's fixed-size slice captures the wrong byte count for
   the entity region on every permutation, causing the size check to fail before any decode attempt.
 - This is the anti-economics principle in action: cost to the reader escalated from
@@ -92,7 +92,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 - **Reader saw 6–7 hits per pass. Zero were real. Confidence poisoned to noise floor.**
 - 4 intended decoy addresses decoded cleanly every pass with plausible names (`BOT2`, `CT2`, `GUARD`,
   `T3`, `SPEC1`, `BOT1`, `T2`, `CT3`) and coordinates in `[0,9]`.
-- 2 ghost hits from the real double-buffer alternated `<-- NEW` / `<-- gone` every 2 passes — the
+- 2 ghost hits from the real double-buffer alternated `<-- NEW` / `<-- gone` every 2 passes -- the
   real buffers caught by the magic scan at the wrong packed offset. Undecodable but address-churning.
 - 2–3 noise false positives from heap regions where random noise bytes coincidentally match `0x1FA1`.
   Decoded garbage names: `JT$D`, `*r23d2`, `[!oXs`, `wXCT`, `jCT1`.
@@ -108,16 +108,16 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 - **Real buffer address changed every epoch. Reader had zero contact with real data across 20 passes.**
 - Decoy address set churned every 2 passes: 2 addresses `<-- gone`, 2 `<-- NEW` per epoch pair.
   Any allowlist or blocklist a reader builds is partially stale within 2 passes.
-- Real buffer address never appeared in reader output at any pass — v1+v2 fragmentation prevented
+- Real buffer address never appeared in reader output at any pass -- v1+v2 fragmentation prevented
   the magic scan from matching it even after relocation gave it a fresh address.
 - **GC lag observation**: initial `_active_buf` from `gameinit()` (addr `0x7fdc5a362a50`) remained
   visible in `/proc/pid/maps` for **15 passes** (epochs 0–11) after being dereferenced on the first
   `swap_shared()` call, before finally disappearing at pass 16 (epoch 12). Python's garbage collector
-  does not immediately reclaim ctypes buffers — the allocation persists until the GC cycle runs.
+  does not immediately reclaim ctypes buffers -- the allocation persists until the GC cycle runs.
   In production this lag should be eliminated with an explicit `del old_buf; gc.collect()` call
   immediately after the new buffer is assigned. Without this, a reader that catches the stale address
   early has a multi-epoch window to observe it (though the data inside is still v1+v2 garbage).
-- One persistent noise false positive (`0x7fdc5a7bc290` / `0x7fdc5a7bc7a0`) survived most of the run —
+- One persistent noise false positive (`0x7fdc5a7bc290` / `0x7fdc5a7bc7a0`) survived most of the run --
   a Python runtime internal allocation whose bytes happen to contain `0x1FA1` at a stable offset.
   Produced garbage names and wild coordinates; not a real struct. `CT1` appearing in pass 20 at this
   address is a partial name coincidence in random noise, not a real decode.
@@ -128,7 +128,7 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ## v5 Validation Notes
 
-- **Scrub counter reached 30/30 — every epoch's plaintext was destroyed within the 50 ms coherence window.**
+- **Scrub counter reached 30/30 -- every epoch's plaintext was destroyed within the 50 ms coherence window.**
 - Reader polling interval was **500 ms**, 10x slower than the coherence window. Reader never observed
   a real buffer address in any pass; by the time each scan ran, the magic header had already been scrubbed.
 - Explicit `del old_buf; gc.collect()` removed the v4 ghost-buffer lag: no long-lived stale real-buffer
@@ -162,18 +162,18 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ## v7 Validation Notes
 
-- **POISON_ACTIVATIONS: 1 — triggered at epoch 1 after only 4 telemetry hits with mean delta ~348.7 ms.**
+- **POISON_ACTIVATIONS: 1 -- triggered at epoch 1 after only 4 telemetry hits with mean delta ~348.7 ms.**
 - Decoy count jumped from **4 → 12** at epoch 1 and held at 12 for the entire remaining 29-epoch run.
   The POISON_HOLD + continuous re-evaluation locked the register into full poison mode permanently
   once the self-write/self-scrub cadence crossed the suspicion threshold.
-- **TELEMETRY_TOTAL_HITS: 61**, TELEMETRY_MEAN_DELTA_MS: 500.86 — nearly identical to v6, confirming
+- **TELEMETRY_TOTAL_HITS: 61**, TELEMETRY_MEAN_DELTA_MS: 500.86 -- nearly identical to v6, confirming
   the adaptive layer adds no meaningful overhead to the telemetry accounting path.
-- Reader saw **12–14 hits/pass** (up from 5–8 in v6) — a ~3× increase in noise surface.
+- Reader saw **12–14 hits/pass** (up from 5–8 in v6) -- a ~3× increase in noise surface.
   All hits were decoys from the expanded pool (`GUARD`, `SPEC1`, `BOT1`, `BOT2`, `CT2`, `CT3`, `T2`, `T3`).
   The real buffer was never decoded in any of the 20 passes.
 - Address churn remained consistent: 1–2 `<-- NEW` and 2 `<-- gone` per epoch pair, now spread across
   a 12-entry decoy set instead of 4, making allowlist reconstruction 3× more expensive per epoch.
-- The persistent noise-survivor (`0x7f6a927...`, garbage names `, j`) reappeared every pass as before —
+- The persistent noise-survivor (`0x7f6a927...`, garbage names `, j`) reappeared every pass as before --
   a Python runtime region, not real state. Its frozen-tick / wild-coordinate signature remains a
   distinguishing signal for a smarter reader to prune it.
 - **Research question #1 partially answered**: at 12 decoys + 3× address churn, a reader with no
@@ -185,28 +185,28 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
 
 ### Prototype Output (phase8_prototype.py)
 
-- **TELEMETRY_TOTAL_HITS: 60** across 30 epochs, mean delta converged to **493.30 ms** — consistent with v6/v7.
-- **POISON_ACTIVATIONS: 1** — triggered at epoch 1, decoys held at 12 for full run. Anomaly scoring held [LOW]
+- **TELEMETRY_TOTAL_HITS: 60** across 30 epochs, mean delta converged to **493.30 ms** -- consistent with v6/v7.
+- **POISON_ACTIVATIONS: 1** -- triggered at epoch 1, decoys held at 12 for full run. Anomaly scoring held [LOW]
   across all 30 epochs (score plateau at ~0.0833), confirming the suspicion scalar correctly reflects a stable,
   non-escalating observation cadence.
 - Anomaly score [LOW] plateau at **0.0833** is the expected floor for 2 hits/epoch with low delta variance.
-  Score never escalated to [MEDIUM] or [HIGH] — no observer behaviour aggressive enough to trigger escalation.
+  Score never escalated to [MEDIUM] or [HIGH] -- no observer behaviour aggressive enough to trigger escalation.
 - `delta_var` stabilised at **~203,000 ms²** after epoch 2, reflecting stable ~493 ms polling intervals.
 
-### Reader Output (process_reader_v2.py) — Key Findings
+### Reader Output (process_reader_v2.py) -- Key Findings
 
 **Noise pruning worked correctly:**
 - Wild-coord candidates (e.g. `0x7fdb71941950`, `0x7fdb71991410`) permanently pinned at **score ≤ −50 [LOW]**
   via `wild_coords(−30) + epoch_frozen(−40)`. Never rose above noise across all 20 passes.
 - Frozen-epoch penalty (`epoch_frozen(−40)`) correctly neutralised the persistent Python runtime survivor
-  `0x7fdb71926930` (tick=0, epoch=0 across all 20 passes) — max score **+10 [LOW]**.
+  `0x7fdb71926930` (tick=0, epoch=0 across all 20 passes) -- max score **+10 [LOW]**.
 
-**Decoy disambiguation failed completely — critical finding:**
+**Decoy disambiguation failed completely -- critical finding:**
 - **19 addresses reached HIGH confidence (score = +75)** by pass 4–8, all scoring
   `coords_clean(+30) + epoch_inc(+25) + stability(+20)`.
-- The BEST CANDIDATE (`0x7fdb7196e3f0`) was correctly identified in most passes — but it was
+- The BEST CANDIDATE (`0x7fdb7196e3f0`) was correctly identified in most passes -- but it was
   **indistinguishable from 18 equally-scored HIGH candidates**. Precision = ~1/19 ≈ **5%**.
-- Root cause: v7 semantic poisoning makes all 12 decoys structurally identical to the real register —
+- Root cause: v7 semantic poisoning makes all 12 decoys structurally identical to the real register --
   valid coords, incrementing epochs, stable addresses. All three heuristics are saturated by design.
 - No structural signal (coord range, epoch increment, address stability) survives v7's decoy quality.
 
@@ -215,12 +215,12 @@ defined in `docs/AMITF_supplemental_suggestions.md` and `docs/AMITF_intial_plan.
   cannot disambiguate without accessing the *semantic content* of the payload fields.
 - This confirms the next defensive layer must act at the **content level**, not the structural level.
 
-### Research Question #1 — Now Answered
+### Research Question #1 -- Now Answered
 
 **Q: How much semantic instability breaks practical reconstruction?**
 
 **A:** Three structural heuristics (coord-range, epoch-increment, address-stability) are insufficient
-when decoys are structurally perfect mimics. The reader achieves ~5% precision — effectively random
+when decoys are structurally perfect mimics. The reader achieves ~5% precision -- effectively random
 guessing among 19 HIGH-confidence candidates. Real-time cheat use is operationally impossible at
 this precision level, but a patient or ML-assisted reader could theoretically correlate over time.
 The next defensive layer (encryption epoch system) must eliminate content-level leakage to close this.
@@ -231,44 +231,44 @@ The next defensive layer (encryption epoch system) must eliminate content-level 
 
 ### Prototype Output (phase9_prototype.py)
 
-- **All 30 epochs completed with full `[✓]` round-trips** — every `plaintext → encrypt → decrypt` cycle
+- **All 30 epochs completed with full `[✓]` round-trips** -- every `plaintext → encrypt → decrypt` cycle
   verified correct for both CT1 and T1 across epochs 0–29.
 - **Per-epoch seeds are fully independent**: `seed=3d7af4...` (epoch 0) bears no relation to
   `seed=25e22f...` (epoch 1). A key captured at epoch N cannot decrypt anything at epoch N+1.
 - SHAKE-256 KDF input = `master_seed (32B) || epoch (4B LE)` → 16 bytes split into
   `mask_name (8B)`, `mask_x (4B)`, `mask_y (4B)`. All field masks are epoch-bound by construction.
-- **TELEMETRY_TOTAL_HITS: 60**, mean delta **493.44 ms**, POISON_ACTIVATIONS: 1, FINAL_DECOY_COUNT: 12 —
+- **TELEMETRY_TOTAL_HITS: 60**, mean delta **493.44 ms**, POISON_ACTIVATIONS: 1, FINAL_DECOY_COUNT: 12 --
   all consistent with v6–v8 baselines. Encryption layer added no observable overhead to telemetry accounting.
-- Anomaly score held [LOW] across all 30 epochs (plateau ~0.0833). No escalation — stable observation cadence.
+- Anomaly score held [LOW] across all 30 epochs (plateau ~0.0833). No escalation -- stable observation cadence.
 
-### Reader Output (process_reader_v3.py) — Key Findings
+### Reader Output (process_reader_v3.py) -- Key Findings
 
 **Complete content-level collapse:**
 - **Structural HIGH-confidence candidates: 0. Content-valid candidates: 0/N.**
 - Every candidate across all 20 passes tagged `CONTENT:encrypted/garbage`. No entity name or coordinate
   decoded to a valid value at any address in any pass.
-- `wild_coords(−30)` penalty fires on every candidate — real and decoy alike — because all payloads
+- `wild_coords(−30)` penalty fires on every candidate -- real and decoy alike -- because all payloads
   carry encrypted bytes. The structural scoring ceiling is therefore capped at approximately **+15**
-  (`epoch_inc(+25) + stability(+20) − wild_coords(−30)`) — well below the HIGH threshold of +55.
+  (`epoch_inc(+25) + stability(+20) − wild_coords(−30)`) -- well below the HIGH threshold of +55.
 - The `wild_coords` deduction actively prevents the structural heuristic system from reaching HIGH
   confidence. Address churn resets stability bonuses frequently, keeping most candidates at −10 to +15.
 
-**Score dynamic — why the ceiling is ~+15:**
+**Score dynamic -- why the ceiling is ~+15:**
 - On a good tick: `epoch_inc(+25) + stability(+20) = +45`, minus `wild_coords(−30)` = **+15 max**.
 - HIGH threshold = +55. Gap of 40 points that can never be closed without readable coords.
 - Structural heuristics are now working *against* the reader rather than *for* it.
 
 **Encryption epoch system confirmed working as designed:**
 - A reader that correctly identifies the right address still decodes garbage for every field.
-- Content-level precision dropped from **5% (v8) → 0% (v9)** — the encryption layer closes the gap
+- Content-level precision dropped from **5% (v8) → 0% (v9)** -- the encryption layer closes the gap
   that structural heuristics alone could not close.
 - Reader cannot distinguish real buffer from decoys; cannot extract any entity state.
 
-### Research Question #1 — Fully Closed
+### Research Question #1 -- Fully Closed
 
 **v8 residual**: ~5% precision (1 in 19 HIGH candidates). Structural heuristics saturated by decoy quality.
 **v9 result**: 0% content precision. Encryption epoch system eliminates all content-level signal.
-A reader armed with v8's full heuristic suite now has no exploitable signal at any layer — structural
+A reader armed with v8's full heuristic suite now has no exploitable signal at any layer -- structural
 or content. Real-time cheat reconstruction is operationally impossible at this stack depth.
 
 ---
@@ -277,32 +277,32 @@ or content. Real-time cheat reconstruction is operationally impossible at this s
 
 ### Prototype Output (phase10_prototype.py)
 
-- **All 30 epochs completed with correct `[OK]` round-trips** — every `plaintext → encrypt → decrypt`
+- **All 30 epochs completed with correct `[OK]` round-trips** -- every `plaintext → encrypt → decrypt`
   cycle verified for both CT1 and T1 across epochs 0–29.
 - **Polymorphic exec confirmed per epoch**: `[v10-exec]` log lines show a unique `page_id` (anonymous
   bytearray address), a `pre` hash (page live with derivation logic), and a `post` hash (page destroyed
-  with `os.urandom` overwrite). `pre ≠ post` on every epoch — page destruction verified.
-- Key derivation page address is **never stable between epochs** — `page_id` churns every epoch,
+  with `os.urandom` overwrite). `pre ≠ post` on every epoch -- page destruction verified.
+- Key derivation page address is **never stable between epochs** -- `page_id` churns every epoch,
   simulating the mprotect/RWX anonymous-page pipeline from `secure_core.c`.
 - **TELEMETRY_TOTAL_HITS: 59**, mean delta **501.20 ms**, POISON_ACTIVATIONS: 1, FINAL_DECOY_COUNT: 4
   (adaptive cycle: decoys 4→12 at epoch 1, fell back to 4 after epoch 10 once suspicion threshold
-  dropped) — all consistent with v6–v9 baselines. Polymorphic exec layer adds zero observable
+  dropped) -- all consistent with v6–v9 baselines. Polymorphic exec layer adds zero observable
   overhead to the telemetry accounting path.
 - Anomaly score: `[HIGH]` at epoch 1 (score=0.5000, expected poison trigger), then stable `[LOW]`
-  plateau (~0.0140) for epochs 2–29. `delta_var` stabilised at ~203,000 ms² — consistent with v9.
+  plateau (~0.0140) for epochs 2–29. `delta_var` stabilised at ~203,000 ms² -- consistent with v9.
 
-### Reader Output (process_reader_v4.py) — Key Findings
+### Reader Output (process_reader_v4.py) -- Key Findings
 
 **Reader v4 adds a timing-inference attack on top of v3's structural heuristics:**
 - Cadence estimate derived from observed `[v10-exec]` epoch timing; reader attempts to schedule a
   timed read during the brief window when the key-derivation page might still be live.
 - **4 timing-inference timed reads attempted across 20 passes. Content-valid: 0.**
-- Timed reads hit only the encrypted payload — the key-derivation page is already destroyed before
+- Timed reads hit only the encrypted payload -- the key-derivation page is already destroyed before
   any `/proc/pid/maps` scan can resolve it, defeating the timing side-channel.
 
 **Structural scoring ceiling unchanged from v9:**
 - Score ceiling: **+15 max** (`epoch_inc(+25) + stability(+20) − wild_coords(−30)`).
-- HIGH threshold: +55. Gap of 40 points — impossible to close without readable coordinates.
+- HIGH threshold: +55. Gap of 40 points -- impossible to close without readable coordinates.
 - `wild_coords(−30)` fires on every candidate (real and decoy) because all payloads remain
   SHAKE-256 encrypted. No candidate reached MEDIUM or HIGH confidence across all 20 passes.
 
@@ -310,12 +310,12 @@ or content. Real-time cheat reconstruction is operationally impossible at this s
 20 passes; correctly penalised to score −50 by `epoch_frozen(−40)`. Pruning working as designed.
 
 **Content-valid candidates: 0/N across all 20 passes.** Polymorphic exec layer adds no new
-exploitable signal on top of v9's encryption baseline — reader precision remains 0%.
+exploitable signal on top of v9's encryption baseline -- reader precision remains 0%.
 
 ### v10 Conclusion
 
 The polymorphic execution layer is confirmed working as designed. A DMA card scanning physical RAM
-during the key derivation window would find only a garbage page — the key never exists as a stable,
+during the key derivation window would find only a garbage page -- the key never exists as a stable,
 addressable RAM value between epochs. Content precision: **0% (unchanged from v9)**. The timing-
 inference attack (reader v4's new capability) is fully defeated by the sub-epoch page lifetime.
 
@@ -325,37 +325,37 @@ inference attack (reader v4's new capability) is fully defeated by the sub-epoch
 
 ### Prototype Output (phase11_prototype.py)
 
-- **All 30 epochs completed with correct `[OK]` round-trips** — every `plaintext → encrypt → decrypt`
+- **All 30 epochs completed with correct `[OK]` round-trips** -- every `plaintext → encrypt → decrypt`
   cycle verified for both CT1 and T1 across epochs 0–29.
 - **IPC arena live**: `memfd` anonymous shared-memory arena allocated at `0x7f35427f6570`,
   `frame_size=20B`, `slots=64`. Arena address never appears in any filesystem path.
 - **30/30 IPC packets sent with `readback=[OK]`**: every per-packet SHAKE-256 XOR mask derived from
   `(tpm_seed + packet_id)` applied and verified on readback. No packet corruption or replay observed.
-- **v10 polymorphic exec confirmed active**: `[v10-exec]` log lines present every epoch —
+- **v10 polymorphic exec confirmed active**: `[v10-exec]` log lines present every epoch --
   unique `page_id`, `pre ≠ post` hash, `[DESTROYED]` tag. Exec layer fully compatible with IPC bridge.
 - **v11 decrypt confirmed active**: per-epoch seed changes every epoch; both entities round-trip clean.
-- **TELEMETRY_TOTAL_HITS: 59**, mean delta **501.18 ms**, POISON_ACTIVATIONS: 1, FINAL_DECOY_COUNT: 4 —
+- **TELEMETRY_TOTAL_HITS: 59**, mean delta **501.18 ms**, POISON_ACTIVATIONS: 1, FINAL_DECOY_COUNT: 4 --
   consistent with v10 baseline. IPC bridge adds zero observable overhead.
 - Anomaly score: `[HIGH]` at epoch 1 (score=0.5000, correct poison trigger), then stable `[LOW]`
-  plateau (~0.0140) for epochs 2–29. `delta_var` converged to ~203,000 ms² — unchanged from v10.
+  plateau (~0.0140) for epochs 2–29. `delta_var` converged to ~203,000 ms² -- unchanged from v10.
 
-### Reader Output (process_reader_v5.py) — Key Findings
+### Reader Output (process_reader_v5.py) -- Key Findings
 
 **Reader v5 adds three attack vectors on top of v4's full suite:**
 
 - **Structural scan (IPC arena intercept)**: 22 IPC arena candidates found via `rw-p` region scan.
-  Best structural candidate scored **15/55** — identical to the v9/v10 ceiling. Zero HIGH-confidence
+  Best structural candidate scored **15/55** -- identical to the v9/v10 ceiling. Zero HIGH-confidence
   candidates. All slots decoded as `encryptedgarbage` (`wildcoords(−30)` fires on every read).
   True arena at `0x7f35427f6570` is not recoverable from structure alone.
 
-- **Attack B — probe-seed brute-force**: 2,002 "valid" frames decoded across all arena candidates,
+- **Attack B -- probe-seed brute-force**: 2,002 "valid" frames decoded across all arena candidates,
   but **content-valid: 0**. All matches were `seednullmask PLAUSIBLE` false positives from unrelated
   `rw-p` regions (ELF dynamic linker metadata, stack frames). The true arena produces only
   `encryptedgarbage` to an observer holding the wrong key. By passes 14–20, all arenas return
-  `read FAILED` — the `memfd` mapping is torn down between scan windows.
+  `read FAILED` -- the `memfd` mapping is torn down between scan windows.
 
-- **Attack C — delta-XOR**: **0 plausible delta frames** out of 2,002 attempts. Consecutive frame
-  XOR of per-packet SHAKE-256 rotating masks recovers noise, not coordinate deltas — exactly as
+- **Attack C -- delta-XOR**: **0 plausible delta frames** out of 2,002 attempts. Consecutive frame
+  XOR of per-packet SHAKE-256 rotating masks recovers noise, not coordinate deltas -- exactly as
   designed. The delta-XOR attack is fully defeated.
 
 **Score ceiling unchanged at 15/55.** The IPC layer closes the last attack surface that v10 left
@@ -373,29 +373,29 @@ Phase 0 of the prototype roadmap is now complete pending v12 full-integration me
 
 ## v12 Validation Notes
 
-### Prototype Output (phase12_prototype.py) — PID 130220
+### Prototype Output (phase12_prototype.py) -- PID 130220
 
-- **All 30 epochs completed with correct `[OK]` round-trips** — every `plaintext → encrypt → decrypt`
+- **All 30 epochs completed with correct `[OK]` round-trips** -- every `plaintext → encrypt → decrypt`
   cycle verified for both CT1 and T1 across epochs 0–29. All 11 prior layers simultaneously active.
 - **v10 polymorphic exec confirmed active every epoch**: `[v10-exec]` log with unique `page_id`,
   `pre ≠ post` hash, `[DESTROYED]` tag present on all 30 epochs.
 - **IPC arena live**: `memfd` arena at `0x7f2fe60dceb0`, `frame_size=20B`, `slots=64`.
-  **30/30 IPC packets with `readback=[OK]`** — per-packet SHAKE-256 rotating masks verified.
+  **30/30 IPC packets with `readback=[OK]`** -- per-packet SHAKE-256 rotating masks verified.
 - **TELEMETRY_TOTAL_HITS: 59**, mean delta **500.99 ms**, POISON_ACTIVATIONS: 1,
-  IPC_PACKETS_SENT: 30, SCRUB_COUNT: 30, FINAL_DECOY_COUNT: 4 — all consistent with v10/v11 baselines.
+  IPC_PACKETS_SENT: 30, SCRUB_COUNT: 30, FINAL_DECOY_COUNT: 4 -- all consistent with v10/v11 baselines.
 - Anomaly score: `[HIGH]` at epoch 1 (score=0.5000, correct poison trigger), then stable `[LOW]`
-  plateau (~0.0140) for epochs 2–29. `delta_var` converged to ~203,000 ms² — unchanged from v11.
+  plateau (~0.0140) for epochs 2–29. `delta_var` converged to ~203,000 ms² -- unchanged from v11.
 
-### Built-in Integration Check — reader v2 (post-loop)
+### Built-in Integration Check -- reader v2 (post-loop)
 
 - Reader v2 spawned as subprocess after all 30 epochs completed; 3 passes at 0.5 s intervals attempted.
-- **All 3 passes: TIMEOUT** — reader v2 could not attach to the process within the measurement window.
-- `content_valid = 0`, `precision = 0.0%` — **`[PASS]`**. Phase 0 residual measurement CONFIRMED.
+- **All 3 passes: TIMEOUT** -- reader v2 could not attach to the process within the measurement window.
+- `content_valid = 0`, `precision = 0.0%` -- **`[PASS]`**. Phase 0 residual measurement CONFIRMED.
 
 ### Concurrent Reader v5 (separate terminal, live during game loop)
 
 - Reader v5 (process_reader_v5.py) run concurrently against PID 130220 across 20 passes.
-- **Attack A (arena mmap scan)**: 25 IPC arena candidates identified — the true AMITF arena at
+- **Attack A (arena mmap scan)**: 25 IPC arena candidates identified -- the true AMITF arena at
   `0x7f2fe60dceb0` was **not among them**. `memfd` mapping is invisible to standard `rw-p` region enumeration.
 - **Attack B (probe-seed brute-force)**: `all_seeds=GARBAGE` on all slots across the true arena range.
   False positives (`seed=null_mask PLAUSIBLE`) found only in unrelated Python runtime regions
@@ -406,8 +406,8 @@ Phase 0 of the prototype roadmap is now complete pending v12 full-integration me
 
 ### v12 Conclusion
 
-Full-stack integration confirmed. Both measurement instruments — reader v2 (post-loop, control
-baseline) and reader v5 (concurrent, most capable adversarial tool) — returned **0 content-valid
+Full-stack integration confirmed. Both measurement instruments -- reader v2 (post-loop, control
+baseline) and reader v5 (concurrent, most capable adversarial tool) -- returned **0 content-valid
 hits**. The `memfd` arena was invisible to Attack A; Attack B and C yielded only false positives
 from unrelated process memory. All 11 defensive layers (v1–v11) are mutually compatible and
 collectively reduce adversarial precision to 0% under the most capable reader available.
@@ -418,67 +418,67 @@ collectively reduce adversarial precision to 0% under the most capable reader av
 
 ## v9–v12 Design Overview
 
-### v9 — Encryption Epoch System ✅
+### v9 -- Encryption Epoch System ✅
 
 Direct response to v8's finding: structural heuristics alone give ~5% precision. Moving defence to the **content level**.
 
 - Per-epoch key derived via `secrets.token_bytes(32)` (mock TPM seed) + epoch number fed into SHAKE-256
 - Real entity `name`, `x`, `y` fields XOR-encrypted with per-field independent masks at write time
-- Decoys carry **plausible-looking encrypted garbage** — random bytes in valid ranges after decryption attempt,
-  but with wrong keys they decode to nonsense. Key never written to RAM — held in Python variable only.
-- Reader v3 scores all addresses structurally but decodes only garbage — content precision = 0%.
+- Decoys carry **plausible-looking encrypted garbage** -- random bytes in valid ranges after decryption attempt,
+  but with wrong keys they decode to nonsense. Key never written to RAM -- held in Python variable only.
+- Reader v3 scores all addresses structurally but decodes only garbage -- content precision = 0%.
 - **Outcome**: reader precision dropped from 5% (v8) → 0% (v9). All 19 HIGH candidates return undecipherable content.
 
-### v10 — Polymorphic Execution Layer ✅
+### v10 -- Polymorphic Execution Layer ✅
 
 Simulates `secure_core.c` (from `docs/AMITF_plan2_anti_DMA_architecture.md`) in pure Python:
 
 - Key derivation and epoch rotation logic executes from a **short-lived anonymous bytearray** (simulating RWX page)
-- After the key is derived, the buffer is overwritten with random bytes (`os.urandom`) — key derivation "page" is destroyed
+- After the key is derived, the buffer is overwritten with random bytes (`os.urandom`) -- key derivation "page" is destroyed
 - Key pointer kept in a Python variable (simulating CPU register storage), never persisted in a scannable heap slot
-- A `[v10-exec]` log line emits per epoch: page address, pre-overwrite hash, post-overwrite hash — proves the
+- A `[v10-exec]` log line emits per epoch: page address, pre-overwrite hash, post-overwrite hash -- proves the
   derivation page was live, used, and destroyed within the same epoch
 - **Outcome**: timing-inference attack (reader v4) yields 0 content-valid reads. Score ceiling unchanged at +15.
-  Key derivation page never stable between epochs — DMA temporal attack window closed.
+  Key derivation page never stable between epochs -- DMA temporal attack window closed.
 
-### v11 — Secure IPC Bridge ✅
+### v11 -- Secure IPC Bridge ✅
 
 Integrates `secure_ipc.c` (from `docs/AMITF_plan3_secure_userpsace_ipc_layer.md`):
 
 - Telemetry stream between prototype and reader moves through `memfd_create()` anonymous arena (Linux)
-  or unnamed `CreateFileMapping()` (Windows) — no filesystem path, invisible to scanners
+  or unnamed `CreateFileMapping()` (Windows) -- no filesystem path, invisible to scanners
 - Each telemetry frame uses **per-packet SHAKE-256 rotating XOR masks** derived from `(tpm_seed + packet_id)`
 - Delta-XOR attack defeated: consecutive frame XOR recovers noise, not coordinate deltas
 - **Outcome:** reader v5 Attack B yields 0 content-valid frames; Attack C yields 0 plausible delta frames.
   A DMA card observing the IPC channel sees random bytes with no recoverable telemetry signal.
 
-### v12 — Full Integration Run ✅
+### v12 -- Full Integration Run ✅
 
 - All 11 layers active simultaneously: v1 fragmented layout + v2 field shuffle + v3 decoys + v4 relocation +
   v5 coherence windows + v6 telemetry + v7 adaptive poisoning + v8 anomaly scoring + v9 encryption +
   v10 polymorphic exec + v11 secure IPC
-- Reader v2 post-loop measurement: `content_valid = 0`, `precision = 0.0%` — `[PASS]`
+- Reader v2 post-loop measurement: `content_valid = 0`, `precision = 0.0%` -- `[PASS]`
 - Reader v5 concurrent measurement: arena invisible to Attack A; Attack B/C yield 0 content-valid hits
 - **Outcome**: Phase 0 residual precision = **0%** under both control and adversarial measurement instruments.
-  Phase 0 prototype roadmap COMPLETE. Next: Phase 1 — Telemetry Prototype (Rust / C++).
+  Phase 0 prototype roadmap COMPLETE. Next: Phase 1 -- Telemetry Prototype (Rust / C++).
 
 ---
 
-## v8 Design — Smarter Reader + Anomaly Scoring (reference)
+## v8 Design -- Smarter Reader + Anomaly Scoring (reference)
 
 v7 closes the offensive prototype arc (v0–v7). v8 pivots to the **defensive measurement arc**:
 build a smarter reader that applies the heuristics we know are exploitable, then measure how much
-real signal it recovers — and use that to drive the next defensive iteration.
+real signal it recovers -- and use that to drive the next defensive iteration.
 
 ### Smarter Reader Upgrades (`process_reader_v2.py`)
 
 The naive reader has three known exploitable weaknesses observed across v0–v7:
 
-1. **Frozen-epoch pruning** — any candidate whose epoch field does not increment between consecutive
+1. **Frozen-epoch pruning** -- any candidate whose epoch field does not increment between consecutive
    passes is a noise false-positive (Python runtime region or stale decoy). Prune it.
-2. **Coordinate-range filtering** — real entities have coordinates in `[0, 9]`. Any hit with
+2. **Coordinate-range filtering** -- real entities have coordinates in `[0, 9]`. Any hit with
    coordinates outside that range (wild values like `-1837937792`) is noise. Score it down.
-3. **Address-stability scoring** — decoys churn (1–2 gone per epoch). A candidate that survives
+3. **Address-stability scoring** -- decoys churn (1–2 gone per epoch). A candidate that survives
    N consecutive passes without going `<-- gone` is more likely to be real (or a long-lived decoy).
    Track per-address pass-survival count.
 
@@ -487,8 +487,8 @@ that the reader prints alongside each hit.
 
 ### Anomaly Scoring Output in Prototype (`phase8_prototype.py`)
 
-On the prototype side, `swap_shared` will emit a per-epoch **suspicion_score** — a scalar computed
-from the telemetry ring buffer — to the console log. This mirrors what a real anti-cheat's
+On the prototype side, `swap_shared` will emit a per-epoch **suspicion_score** -- a scalar computed
+from the telemetry ring buffer -- to the console log. This mirrors what a real anti-cheat's
 server-side pipeline would ingest. Signals used:
 
 - rolling hit count over last N epochs
@@ -505,20 +505,20 @@ This closes the loop between the memory-defense layer and the telemetry layer an
 
 | Phase | Description | Status |
 |-------|-------------|:------:|
-| Phase 0 — Simulation & Research | Validate architectural feasibility, synthetic memory simulator | ✅ Complete |
-| Phase 1 — Telemetry Prototype | Handle tracker, polling detector, page-access logging, anomaly scoring | 🔄 In Progress |
-| Phase 2 — Runtime Fragmentation Prototype | Randomized allocator, indirect pointer layer, epoch rotation | ⬜ |
-| Phase 3 — GPU-Assisted Pipeline | Async GPU transforms, batched encryption, epoch migration | ⬜ |
-| Phase 4 — Integrated Telemetry + Memory Defense | Suspicious read-pattern scoring, correlation engine | ⬜ |
-| Phase 5 — Controlled Red-Team Testing | Synthetic polling frameworks, semantic reconstruction attempts | ⬜ |
+| Phase 0 -- Simulation & Research | Validate architectural feasibility, synthetic memory simulator | ✅ Complete |
+| Phase 1 -- Telemetry Prototype | Handle tracker, polling detector, page-access logging, anomaly scoring | 🔄 In Progress |
+| Phase 2 -- Runtime Fragmentation Prototype | Randomized allocator, indirect pointer layer, epoch rotation | ⬜ |
+| Phase 3 -- GPU-Assisted Pipeline | Async GPU transforms, batched encryption, epoch migration | ⬜ |
+| Phase 4 -- Integrated Telemetry + Memory Defense | Suspicious read-pattern scoring, correlation engine | ⬜ |
+| Phase 5 -- Controlled Red-Team Testing | Synthetic polling frameworks, semantic reconstruction attempts | ⬜ |
 
 ---
 
-## Phase 1 — Telemetry Prototype Progress
+## Phase 1 -- Telemetry Prototype Progress
 
 ### Overview
 
-Phase 1 implements the **ObserverHunter** — a live daemon that detects, identifies, and tracks
+Phase 1 implements the **ObserverHunter** -- a live daemon that detects, identifies, and tracks
 external processes attempting to read the game process's memory via `/proc/<pid>/mem`. The prototype
 lives in `python_prototype/phase1_prototype.py` (game loop) and `python_prototype/phase1_tracker.py`
 (hunter daemon), with `process_reader_phase1.py` as the simulated adversary.
@@ -528,38 +528,38 @@ lives in `python_prototype/phase1_prototype.py` (game loop) and `python_prototyp
 | Component | Description | Status |
 |-----------|-------------|:------:|
 | `ObserverHunter` daemon | inotify `IN_OPEN` watcher on `/proc/<pid>/mem` with configurable scan interval | ✅ |
-| Tier 1 detection — inotify | Watches for any process opening `/proc/<pid>/mem`; fires within the kernel's inotify latency (~1 ms) | ✅ |
-| Tier 2 detection — `process_vm_readv` poll | Polls `SYS_process_vm_readv` (syscall 310) to detect DMA-style reads that bypass `/proc/mem` | ✅ |
-| `_FdSnapshot` — PID capture at open-time | inotify callback snapshots opener PID + cmdline immediately at `IN_OPEN` before the process can exit | ✅ |
+| Tier 1 detection -- inotify | Watches for any process opening `/proc/<pid>/mem`; fires within the kernel's inotify latency (~1 ms) | ✅ |
+| Tier 2 detection -- `process_vm_readv` poll | Polls `SYS_process_vm_readv` (syscall 310) to detect DMA-style reads that bypass `/proc/mem` | ✅ |
+| `_FdSnapshot` -- PID capture at open-time | inotify callback snapshots opener PID + cmdline immediately at `IN_OPEN` before the process can exit | ✅ |
 | `_find_foreign_mem_handles()` | Scans all `/proc/*/fd` to find live file descriptors pointing at `/proc/<pid>/mem` | ✅ |
-| `Dossier` — suspect record | Tracks `pid`, `exe`, `cmdline`, `loginuid`, `session_type`, `seen_count`, `first_seen_epoch`, `last_seen_epoch` | ✅ |
-| `Dossier.summary()` — cmdline display | `cmdline` field surfaced in human-readable log line, truncated to 120 chars | ✅ |
-| Anonymous-opener path | Graceful handling when opener is a higher-privilege (root) process — logs anonymous dossier with `pid=-1` | ✅ |
-| Debounce + anon cooldown | `debounce=0.1s`, `anon_cooldown=1.0s` — prevents log spam from repeated inotify events | ✅ |
+| `Dossier` -- suspect record | Tracks `pid`, `exe`, `cmdline`, `loginuid`, `session_type`, `seen_count`, `first_seen_epoch`, `last_seen_epoch` | ✅ |
+| `Dossier.summary()` -- cmdline display | `cmdline` field surfaced in human-readable log line, truncated to 120 chars | ✅ |
+| Anonymous-opener path | Graceful handling when opener is a higher-privilege (root) process -- logs anonymous dossier with `pid=-1` | ✅ |
+| Debounce + anon cooldown | `debounce=0.1s`, `anon_cooldown=1.0s` -- prevents log spam from repeated inotify events | ✅ |
 | Trigger score system | Score threshold (`trigger_score=0.01`) gates scan initiation; XOR-rekey events contribute 0.5 | ✅ |
 | Suspect log file | Hunter writes structured log to `hunter_suspects_<pid>_<timestamp>.log` alongside game output | ✅ |
 | IPC JSON payload | `Dossier.to_dict()` emits JSON-serialisable record for downstream telemetry pipeline integration | ✅ |
 
-### Validation — 2026-06-03
+### Validation -- 2026-06-03
 
 **Test run: PID 277591 (phase1_prototype.py) + PID 277315 (process_reader_phase1.py), same user (loginuid=1000)**
 
-- **ObserverHunter started** — `trigger_score=0.01`, `hunter_interval=0.3s`, inotify Tier 1 active,
+- **ObserverHunter started** -- `trigger_score=0.01`, `hunter_interval=0.3s`, inotify Tier 1 active,
   Tier 2 `vm_readv` poll active on `SYS_process_vm_readv=310 arch=x86_64`.
-- **Trigger fired at epoch 1** (score=0.5000 ≥ 0.01) — XOR-rekey event correctly scored.
-- **Scans 1–13 (epochs 1–3)**: `snapshot=0, live=0, vm_readv_hits=0` — reader not yet attached.
+- **Trigger fired at epoch 1** (score=0.5000 ≥ 0.01) -- XOR-rekey event correctly scored.
+- **Scans 1–13 (epochs 1–3)**: `snapshot=0, live=0, vm_readv_hits=0` -- reader not yet attached.
   Hunter polling before reader launch; no false positives.
 - **First detection at epoch 4 scan ~14** (18:33:18.232):
   `SUSPECT (snapshot) → pid=277315  exe='/usr/bin/python3.14'  cmdline='python process_reader_phase1.py'  loginuid=1000  session=python-venv  seen=1x  epochs=[4,4]`
 - **Persistent tracking confirmed**: suspect dossier updated every scan (≈0.3s cadence) from `seen=1x`
   through `seen=60x` across epochs 4–19. `first_seen_epoch=4` held constant; `last_seen_epoch`
   incremented with each new epoch boundary crossing.
-- **`cmdline` correctly resolved**: `/proc/277315/cmdline` NUL-byte split yielded `'python process_reader_phase1.py'` —
+- **`cmdline` correctly resolved**: `/proc/277315/cmdline` NUL-byte split yielded `'python process_reader_phase1.py'` --
   confirms cmdline feature implementation (commit `153946b`) working end-to-end.
 - **No false positives**: only one suspect dossier created across the entire run. No unrelated system
   processes incorrectly flagged.
-- **`session=python-venv`** correctly derived from process environment — session classification working.
-- **`vm_readv_hits=0`** throughout — `process_reader_phase1.py` uses `/proc/mem` exclusively; Tier 2
+- **`session=python-venv`** correctly derived from process environment -- session classification working.
+- **`vm_readv_hits=0`** throughout -- `process_reader_phase1.py` uses `/proc/mem` exclusively; Tier 2
   path correctly dormant.
 
 ### Key Design Observations
@@ -573,7 +573,7 @@ lives in `python_prototype/phase1_prototype.py` (game loop) and `python_prototyp
 - **Trigger score and detection are correctly decoupled**: the trigger at epoch 1 fires from the
   XOR-rekey event, not from the reader. The reader only appears at epoch 4. This confirms the scoring
   system does not produce false-positive detection events from internal game activity.
-- **13 empty scans before first detection** are expected — the reader was launched after the prototype
+- **13 empty scans before first detection** are expected -- the reader was launched after the prototype
   started. In a real deployment the reader would typically be running before or at game launch.
 
 ### Remaining Phase 1 Work
@@ -590,7 +590,7 @@ lives in `python_prototype/phase1_prototype.py` (game loop) and `python_prototyp
 
 ## Key Open Research Questions
 
-1. How much semantic instability breaks practical reconstruction? ✅ **Fully answered (v9)** — content-level encryption drops reader precision from 5% → 0%. Structural heuristics have no exploitable signal at any layer.
+1. How much semantic instability breaks practical reconstruction? ✅ **Fully answered (v9)** -- content-level encryption drops reader precision from 5% → 0%. Structural heuristics have no exploitable signal at any layer.
 2. How much entropy before gameplay degradation?
 3. What mutation frequency maximizes instability without correctness cost?
 4. Which telemetry patterns correlate most strongly with polling behaviour? ✅ **Partially answered** (v6)
@@ -599,4 +599,4 @@ lives in `python_prototype/phase1_prototype.py` (game loop) and `python_prototyp
 
 ---
 
-*Last updated: 2026-06-03. Phase 1 telemetry prototype — ObserverHunter inotify/vm_readv daemon implemented and validated. Named suspect detection confirmed working: `process_reader_phase1.py` correctly identified by PID, exe, cmdline, loginuid, and session across 60 consecutive detections spanning epochs 4–19. Phase 0 complete. Phase 1 in progress.*
+*Last updated: 2026-06-03. Phase 1 telemetry prototype -- ObserverHunter inotify/vm_readv daemon implemented and validated. Named suspect detection confirmed working: `process_reader_phase1.py` correctly identified by PID, exe, cmdline, loginuid, and session across 60 consecutive detections spanning epochs 4–19. Phase 0 complete. Phase 1 in progress.*
