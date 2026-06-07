@@ -67,9 +67,15 @@ two channels that ARE observable from outside the process:
   which the poller can observe the open file descriptor and trigger the
   hunter, even without the anomaly score crossing the MEDIUM threshold.
 
-  The background thread holds the fd open, seeks to a random rw-p region,
-  and does a tiny read every HOLD_READ_INTERVAL seconds to keep the fd
-  alive in the kernel's fd table.
+  The background thread holds the fd open, seeks to a valid rw-p region,
+  and does a tiny read via the HELD FILE OBJECT every HOLD_READ_INTERVAL
+  seconds to keep the fd provably alive in the kernel's fd table.
+
+  IMPORTANT: keep-alive reads MUST use self.fd.seek() + self.fd.read()
+  — NOT read_mem() / process_vm_readv — otherwise Python's GC may close
+  the underlying file object between reads, making it invisible to
+  /proc/*/fd scans and causing `ls /proc/<reader_pid>/fd | grep mem`
+  to return nothing.
 
 PRIVILEGES & YAMA PTRACE SCOPE
 --------------------------------
@@ -522,9 +528,11 @@ class FdHoldThread:
     to observe our open handle and trigger the hunter — independent of
     whether the anomaly score crosses the MEDIUM threshold.
 
-    Note: the keep-alive reads use the process_vm_readv path (read_mem)
-    rather than the held fd, so the fd-hold thread purely demonstrates
-    /proc/<pid>/mem presence to the hunter's inotify + fd-poller.
+    CRITICAL: keep-alive reads use self.fd.seek() + self.fd.read() on the
+    HELD FILE OBJECT, NOT read_mem() / process_vm_readv.  Using read_mem()
+    here was the original bug: read_mem() never touches self.fd, so Python's
+    GC was free to close it between iterations, making the fd invisible to
+    /proc/<reader_pid>/fd scans and to the hunter's _FdPoller.
     """
 
     def __init__(self, pid: int, regions: List[Tuple[int, int]]):
@@ -567,18 +575,27 @@ class FdHoldThread:
             print(f"[fd-hold] FAILED to open /proc/{self._pid}/mem: {exc}")
             return
 
+        # Pick the first readable rw-p region for keep-alive seeks.
+        seek_addr = None
+        for start, end in self._regions:
+            if end - start >= 16:
+                seek_addr = start
+                break
+
         print(f"[fd-hold] Holding /proc/{self._pid}/mem open for "
               f"{HOLD_DURATION}s  (hunter fd-poller window)")
 
         deadline = time.time() + HOLD_DURATION
         while not self._stop.is_set() and time.time() < deadline:
-            # Keep-alive read via process_vm_readv (avoids double-open noise)
-            for start, end in self._regions:
-                sz = min(16, end - start)
-                if sz <= 0:
-                    continue
-                read_mem(self._pid, start, sz)
-                break
+            # Keep-alive: use the HELD fd directly so it stays visible in
+            # /proc/<our_pid>/fd and in the hunter's _FdPoller scan.
+            if seek_addr is not None:
+                try:
+                    self.fd.seek(seek_addr)
+                    self.fd.read(16)
+                except OSError:
+                    # Transient read failure (e.g. page unmapped) — safe to skip.
+                    pass
             self._stop.wait(timeout=HOLD_READ_INTERVAL)
 
         print(f"[fd-hold] Releasing /proc/{self._pid}/mem fd")
