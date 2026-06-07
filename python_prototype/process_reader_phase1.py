@@ -90,13 +90,23 @@ access via /proc/sys/kernel/yama/ptrace_scope:
       Requires sudo for this reader.
   3 — no cross-process ptrace at all; reader cannot function.
 
-RECOMMENDED WORKFLOW (no sudo needed):
-  Terminal 1:  python3 phase1_prototype.py
-  Terminal 2:  python3 process_reader_phase1.py   # enter PID when prompted
+RECOMMENDED WORKFLOW (no sudo needed, no manual PID entry):
+  Terminal 1:  python3 process_reader_phase1.py
+               (starts immediately; waits up to 60 s for prototype)
+  Terminal 2:  python3 phase1_prototype.py
 
-Both terminals must run as the same non-root user.  If you get a
-PermissionError on process_vm_readv, lower ptrace_scope to 0 (see above)
-or pass the reader PID to prctl(PR_SET_PTRACER) from the prototype.
+  The reader auto-discovers the prototype's PID by scanning /proc/*/cmdline.
+  Both terminals must run as the same non-root user.
+
+  Alternatively, pass an explicit PID on the command line:
+      python3 process_reader_phase1.py <pid>
+
+  Or override the target script name via environment variable:
+      READER_TARGET=my_prototype.py python3 process_reader_phase1.py
+
+If you get a PermissionError on process_vm_readv, lower ptrace_scope to 0
+(see above) or pass the reader PID to prctl(PR_SET_PTRACER) from the
+prototype.
 
 NOTE: Running the reader as root (sudo) while the prototype runs as a
 normal user makes the reader a higher-privilege process.  The hunter's
@@ -125,7 +135,14 @@ EXPECTED BEHAVIOUR
 USAGE
 -----
     python3 process_reader_phase1.py
-    (enter PID of phase1_prototype.py when prompted)
+    (auto-discovers phase1_prototype.py PID — start reader BEFORE or AFTER
+     the prototype; reader waits up to DISCOVER_TIMEOUT seconds)
+
+    python3 process_reader_phase1.py <pid>
+    (explicit PID — legacy behaviour)
+
+    READER_TARGET=some_script.py python3 process_reader_phase1.py
+    (auto-discover a differently-named prototype)
 
     The reader runs for HOLD_DURATION seconds (default 30 s) while keeping
     /proc/<pid>/mem open so the hunter can observe and record it.
@@ -177,6 +194,11 @@ HUNTER_SLOT_SIZE = 512     # bytes — matches phase1_tracker.HUNTER_SLOT_SIZE
 HOLD_DURATION       = 30.0   # seconds to keep /proc/<pid>/mem open
 HOLD_READ_INTERVAL  = 0.8    # seconds between keep-alive reads in hold thread
 
+# Auto-discovery parameters
+DISCOVER_TARGET        = os.environ.get("READER_TARGET", "phase1_prototype.py")
+DISCOVER_TIMEOUT       = 60.0   # seconds to wait for the prototype to appear
+DISCOVER_POLL_INTERVAL = 0.5    # seconds between /proc scans while waiting
+
 # Probe seeds for Attack B / dossier brute-force
 _PROBE_SEEDS = [
     ("zero_seed", bytes(32)),
@@ -185,6 +207,83 @@ _PROBE_SEEDS = [
     ("0xFF_seed", bytes([0xFF] * 32)),
     ("null_mask", None),   # None → identity (no XOR)
 ]
+
+
+# ---------------------------------------------------------------------------
+# PID auto-discovery
+# ---------------------------------------------------------------------------
+
+def _cmdline(pid: int) -> str:
+    """Return the /proc/<pid>/cmdline as a single space-joined string, or ''."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\x00", b" ").decode(errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def discover_pid(target_script: str = DISCOVER_TARGET) -> Optional[int]:
+    """
+    Scan /proc for a process whose cmdline contains `target_script`.
+    Returns the PID (int) of the first match, or None if not found.
+
+    Excludes our own PID and any process whose cmdline contains
+    'process_reader' (to avoid self-matching when the reader is restarted).
+    """
+    our_pid = os.getpid()
+    try:
+        pids = [int(e) for e in os.listdir("/proc") if e.isdigit()]
+    except Exception:
+        return None
+
+    for pid in pids:
+        if pid == our_pid:
+            continue
+        cmdline = _cmdline(pid)
+        if target_script in cmdline and "process_reader" not in cmdline:
+            return pid
+    return None
+
+
+def wait_for_pid(
+    target_script: str = DISCOVER_TARGET,
+    timeout: float = DISCOVER_TIMEOUT,
+    poll: float = DISCOVER_POLL_INTERVAL,
+) -> int:
+    """
+    Wait up to `timeout` seconds for a process matching `target_script`
+    to appear in /proc.  Returns the PID when found.
+
+    Prints a friendly waiting message every 5 seconds so the user knows
+    the reader is alive and waiting.
+    """
+    deadline   = time.time() + timeout
+    next_print = time.time()
+
+    print(f"[auto-discover] Waiting for '{target_script}' "
+          f"(timeout={timeout:.0f}s) …")
+
+    while time.time() < deadline:
+        pid = discover_pid(target_script)
+        if pid is not None:
+            print(f"[auto-discover] Found '{target_script}'  PID={pid}")
+            return pid
+
+        now = time.time()
+        if now >= next_print:
+            remaining = deadline - now
+            print(f"[auto-discover]   still waiting … {remaining:.0f}s left  "
+                  f"(start 'python3 {target_script}' in another terminal)")
+            next_print = now + 5.0
+
+        time.sleep(poll)
+
+    print(f"\n[auto-discover] ERROR: '{target_script}' not found within "
+          f"{timeout:.0f}s.\n"
+          f"  • Make sure phase1_prototype.py is running as the SAME user.\n"
+          f"  • Or pass an explicit PID:  python3 process_reader_phase1.py <pid>\n"
+          f"  • Or set READER_TARGET env var to the correct script name.")
+    sys.exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -675,8 +774,7 @@ class DossierProbe:
             print(f"      raw[:8]={raw_ipc[:8].hex()}  pkt_id_bytes={pkt_id_raw}")
 
         print(f"    Hunter-stride slot 63 (offset={hunter_offset}): "
-              f"{'read OK' if raw_hunter else 'read FAILED (arena too small — expected)'}")
-
+              f"{'read OK' if raw_hunter else 'read FAILED (arena too small — expected)'}`)
         if raw_hunter:
             # Unexpected success — hunter arena larger than 1280 bytes
             if raw_hunter != self.prev_raw:
@@ -764,7 +862,19 @@ class DossierProbe:
 # ---------------------------------------------------------------------------
 
 def main():
-    pid = int(input("Enter target process PID (phase1_prototype.py): ").strip())
+    # ── PID resolution ─────────────────────────────────────────────────────
+    # Priority:
+    #   1. Explicit CLI argument: python3 process_reader_phase1.py <pid>
+    #   2. Auto-discovery: scan /proc/*/cmdline for DISCOVER_TARGET
+    if len(sys.argv) >= 2:
+        try:
+            pid = int(sys.argv[1])
+            print(f"[pid] Using explicit PID from command line: {pid}")
+        except ValueError:
+            print(f"[pid] ERROR: '{sys.argv[1]}' is not a valid PID integer.")
+            sys.exit(1)
+    else:
+        pid = wait_for_pid()
 
     regions     = list_rw_regions(pid)
     block_size  = HEADER_SIZE + EXPECTED_CNT * ENTITY_SIZE
