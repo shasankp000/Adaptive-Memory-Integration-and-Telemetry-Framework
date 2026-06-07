@@ -21,6 +21,12 @@ Tier 1 — inotify IN_OPEN on /proc/<own_pid>/mem  (_InotifyMemWatcher)
     The gate resets on IN_CLOSE so a genuine re-open after close is never
     suppressed.
 
+    Re-entrancy guard (_scanning Event):
+    _find_foreign_mem_handles() opens /proc/*/fd entries while scanning,
+    which can itself trigger IN_OPEN on /proc/<pid>/mem.  A _scanning
+    flag on _InotifyMemWatcher prevents a second concurrent call to
+    _on_mem_open() from racing the first one.
+
     When the outward /proc/*/fd scan finds nothing (reader is root, we are
     not), the open is logged as SUSPECT(anonymous-open) with a 1 s rate
     limit rather than flooding stdout.
@@ -28,7 +34,7 @@ Tier 1 — inotify IN_OPEN on /proc/<own_pid>/mem  (_InotifyMemWatcher)
     Falls back automatically to Tier 2 if inotify on /proc pseudofiles
     is unavailable (some containers, older kernels).
 
-Tier 2 — /proc/*/syscall poller  (_VmReadvPoller)  [NEW]
+Tier 2 — /proc/*/syscall poller  (_VmReadvPoller)
     Catches readers that use process_vm_readv() instead of opening
     /proc/<pid>/mem.  process_vm_readv is a direct kernel syscall
     (SYS_process_vm_readv) that reads a foreign process's virtual memory
@@ -57,6 +63,10 @@ Tier 2 — /proc/*/syscall poller  (_VmReadvPoller)  [NEW]
 
     Controlled by HunterConfig.vm_readv_poll (bool, default True) and
     HunterConfig.vm_readv_rate (float seconds, default 0.05).
+
+    NOTE: _VmReadvPoller is armed by inotify IN_OPEN events (via
+    _force_active) even before the anomaly score crosses trigger_score,
+    so it catches readers that connect before the game loop warms up.
 
 Tier 3 — periodic /proc/*/fd poll  (_FdPoller)  [FALLBACK]
     Polls _find_foreign_mem_handles() every fd_poll_interval (0.05 s).
@@ -707,6 +717,14 @@ class _InotifyMemWatcher:
     initial open().  A debounce gate (_OPEN_DEBOUNCE_S) coalesces these
     rapid-fire events into one callback per burst.  The gate resets on
     IN_CLOSE so a genuine re-open after close is never suppressed.
+
+    Re-entrancy guard
+    -----------------
+    _find_foreign_mem_handles() opens /proc/*/fd entries while scanning,
+    which can itself re-trigger IN_OPEN on /proc/<pid>/mem.  The
+    _scanning Event is set for the duration of the callback and cleared
+    immediately after.  A second IN_OPEN that fires while _scanning is
+    set is silently dropped — the first callback is already handling it.
     """
 
     def __init__(self, mem_path: str, own_pid: int,
@@ -727,6 +745,11 @@ class _InotifyMemWatcher:
         self._debounce_active  = False
         self._debounce_timer: Optional[threading.Timer] = None
         self._debounce_lock    = threading.Lock()
+
+        # Re-entrancy guard: set while _on_open_cb is executing so that
+        # a re-triggered IN_OPEN from _find_foreign_mem_handles() does
+        # not spawn a second concurrent callback invocation.
+        self._scanning = threading.Event()
 
     def start(self) -> bool:
         try:
@@ -758,11 +781,30 @@ class _InotifyMemWatcher:
                 pass
 
     def _fire_open(self) -> None:
-        """Called once per debounced burst — invokes the open callback."""
+        """Called once per debounced burst — invokes the open callback.
+
+        Re-entrancy guard: if a previous _fire_open() invocation is still
+        running (e.g. its _find_foreign_mem_handles scan re-triggered
+        IN_OPEN which rescheduled the debounce timer), we drop this
+        redundant call entirely — the in-flight call will handle it.
+        """
+        if self._scanning.is_set():
+            # Another _on_open_cb is already in-flight; this event was
+            # caused by that scan opening /proc/*/fd entries.  Drop it.
+            with self._debounce_lock:
+                self._debounce_active = False
+                self._debounce_timer  = None
+            return
+
         with self._debounce_lock:
             self._debounce_active = False
             self._debounce_timer  = None
-        self._on_open_cb()
+
+        self._scanning.set()
+        try:
+            self._on_open_cb()
+        finally:
+            self._scanning.clear()
 
     def _run(self) -> None:
         buf = bytearray(4096)
@@ -801,7 +843,7 @@ class _InotifyMemWatcher:
 
 
 # ---------------------------------------------------------------------------
-# Tier 2 — process_vm_readv poller  (NEW)
+# Tier 2 — process_vm_readv poller
 # ---------------------------------------------------------------------------
 
 class _VmReadvPoller:
@@ -845,7 +887,8 @@ class _VmReadvPoller:
 
     def _run(self) -> None:
         while not self._stop.is_set():
-            # Only scan while the hunter is ACTIVE (anomaly score triggered)
+            # Only scan while the hunter is ACTIVE (anomaly score triggered
+            # OR inotify IN_OPEN received — see _force_active())
             if not self._active.wait(timeout=0.5):
                 continue
             hits = _find_vm_readv_readers(self._own_pid)
@@ -1045,14 +1088,60 @@ class ObserverHunter:
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _force_active(self) -> None:
+        """
+        Transition to ACTIVE and arm _VmReadvPoller unconditionally.
+
+        Called by _on_mem_open() whenever a genuine (non-self) IN_OPEN
+        event arrives — regardless of whether the anomaly score has
+        crossed trigger_score yet.  This ensures that a reader which
+        connects before the game loop warms up is still detected by
+        Tier 2 and the scan thread.
+
+        Safe to call from multiple threads; uses _state_lock for
+        the state transition and is idempotent if already ACTIVE.
+        """
+        with self._state_lock:
+            already_active = (self._state == self._STATE_ACTIVE)
+            if not already_active:
+                self._state = self._STATE_ACTIVE
+
+        if not already_active:
+            if self._vmreadv_poller is not None:
+                self._vmreadv_poller.set_active(True)
+            self.trigger_count += 1
+            self._log.log(
+                f"[hunter] TRIGGERED at epoch={self._epoch}  "
+                f"reason=[inotify-IN_OPEN — reader detected before score threshold]  "
+                f"initiating scan"
+            )
+            self._wake_event.set()
+        else:
+            # Already active — just make sure the scan thread is awake
+            self._wake_event.set()
+
+    # ------------------------------------------------------------------
     # inotify callbacks  (run in the inotify watcher thread)
     # ------------------------------------------------------------------
 
     def _on_mem_open(self) -> None:
-        """Fired (debounced) when IN_OPEN is received on /proc/<pid>/mem."""
+        """
+        Fired (debounced) when IN_OPEN is received on /proc/<pid>/mem.
+
+        Re-entrancy note: _InotifyMemWatcher._fire_open() sets its
+        _scanning Event before calling this method and clears it after.
+        A second concurrent call is dropped at the _fire_open() level,
+        so we never execute this method twice simultaneously.
+        """
         hits, any_eperm = _find_foreign_mem_handles(self._own_pid, self._mem_target)
 
         if hits:
+            # Named opener found — promote to ACTIVE immediately so the
+            # scan thread and vm_readv poller are ready.
+            self._force_active()
             for pid, fd_paths in hits:
                 snap = _FdSnapshot(
                     pid=pid,
@@ -1063,6 +1152,7 @@ class ObserverHunter:
                 )
                 with self._snapshot_lock:
                     self._snapshot_q.append(snap)
+            # _wake_event already set by _force_active(); no-op to set again
             self._wake_event.set()
             return
 
@@ -1071,13 +1161,25 @@ class ObserverHunter:
         # (b) higher-privilege reader (PermissionError on their fd dir)
         # (c) our own Tier 4 scan triggered the IN_OPEN (self-open)
         if not any_eperm:
-            # outcome (c) — silent, no wake
+            # outcome (a) or (c) — we cannot tell which, but either way
+            # a real open DID occur.  Promote to ACTIVE so vm_readv poller
+            # and scan thread are armed for the next event.  Emit no
+            # dossier (we have no PID), but log for observability.
+            self._log.log(
+                f"[hunter] inotify IN_OPEN (no fd found, no eperm) at "
+                f"epoch={self._epoch}  — arming scan (possible fast open/close)"
+            )
+            self._force_active()
             return
 
-        # outcome (b) — anonymous opener
+        # outcome (b) — anonymous opener (higher-privilege process)
         now = time.monotonic()
         with self._state_lock:
             cur_epoch = self._epoch
+
+        # Always arm the scan regardless of rate-limit cooldown.
+        self._force_active()
+
         if now - self._last_anon_log >= _ANON_LOG_COOLDOWN_S:
             self._last_anon_log = now
             self._log.log(
@@ -1137,12 +1239,12 @@ class ObserverHunter:
         """Single scan pass — drains snapshot queue, live fd scan,
         and now also drains the vm_readv queue."""
 
-        # --- Phase A: drain inotify snapshot queue ---
+        # ——— Phase A: drain inotify snapshot queue ———
         with self._snapshot_lock:
             snaps = list(self._snapshot_q)
             self._snapshot_q.clear()
 
-        # --- Phase B: live /proc/*/fd scan ---
+        # ——— Phase B: live /proc/*/fd scan ———
         live_hits, _ = _find_foreign_mem_handles(self._own_pid, self._mem_target)
 
         # Merge snapshot + live fd hits
@@ -1157,7 +1259,7 @@ class ObserverHunter:
                     epoch=epoch,
                 )
 
-        # --- Phase C: drain vm_readv queue ---
+        # ——— Phase C: drain vm_readv queue ———
         with self._vmreadv_lock:
             vmreadv_pids = list(self._vmreadv_q)
             self._vmreadv_q.clear()
