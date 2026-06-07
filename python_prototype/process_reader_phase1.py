@@ -727,33 +727,6 @@ class DossierProbe:
     def probe(
         self, pid: int, arena_addr: int, pass_num: int,
     ) -> None:
-        """
-        The hunter writes to slot 63 using HUNTER_SLOT_SIZE-byte offsets
-        (slot * HUNTER_SLOT_SIZE from the arena base).  However the IPC
-        arena itself is only IPC_ARENA_SIZE=1280 bytes.  The hunter writes
-        its dossier slot SEPARATELY by calling arena.write(slot * HUNTER_SLOT_SIZE, frame).
-        For the memfd arena of size IPC_FRAME_SIZE * 64 = 1280 bytes this
-        means slot 63 × 512 = 32256, which is OUTSIDE the 1280-byte arena.
-
-        Resolution: the arena size passed to SecureIPCArena is
-        IPC_FRAME_SIZE * 64 = 1280 bytes, and HUNTER_SLOT_SIZE = 512.
-        Slot 63 at offset 63 * 512 = 32256 is indeed beyond the arena.
-        The hunter will get an IndexError/mmap range error when writing
-        unless the arena was allocated large enough.
-
-        Looking at phase1_tracker._emit_dossier:
-            arena.write(slot * HUNTER_SLOT_SIZE, frame)
-        and phase1_prototype:
-            state.ipc_arena = SecureIPCArena(size=IPC_FRAME_SIZE * 64)
-        → size = 1280 bytes; slot 63 offset = 32256 → OUT OF RANGE.
-
-        The hunter's _emit_dossier will silently fail (try/except).
-        We report this mismatch as a finding.
-
-        For completeness we also probe at the in-arena offset
-        slot 63 × IPC_FRAME_SIZE = 63 × 20 = 1260 bytes (the last
-        telemetry slot offset) in case the arena is larger than expected.
-        """
         # Offset if hunter used IPC_FRAME_SIZE stride (last telemetry slot)
         ipc_offset = 63 * IPC_FRAME_SIZE   # 1260 — last byte in 1280-byte arena
 
@@ -773,8 +746,9 @@ class DossierProbe:
             pkt_id_raw = raw_ipc[:4].hex()
             print(f"      raw[:8]={raw_ipc[:8].hex()}  pkt_id_bytes={pkt_id_raw}")
 
-        print(f"    Hunter-stride slot 63 (offset={hunter_offset}): "
-              f"{'read OK' if raw_hunter else 'read FAILED (arena too small — expected)'}`)
+        hunter_status = "read OK" if raw_hunter else "read FAILED (arena too small — expected)"
+        print(f"    Hunter-stride slot 63 (offset={hunter_offset}): {hunter_status}")
+
         if raw_hunter:
             # Unexpected success — hunter arena larger than 1280 bytes
             if raw_hunter != self.prev_raw:
@@ -862,7 +836,7 @@ class DossierProbe:
 # ---------------------------------------------------------------------------
 
 def main():
-    # ── PID resolution ─────────────────────────────────────────────────────
+    # ── PID resolution ──────────────────────────────────────────────────────
     # Priority:
     #   1. Explicit CLI argument: python3 process_reader_phase1.py <pid>
     #   2. Auto-discovery: scan /proc/*/cmdline for DISCOVER_TARGET
@@ -946,13 +920,10 @@ def main():
 
             parsed = try_parse_header(raw)
             if parsed is None:
-                # Expected: version=12 is correct but layout is opaque;
-                # many decoy buffers also exist.  Only log version matches.
                 if len(raw) >= 4:
                     magic_read = struct.unpack_from("<H", raw, 0)[0]
                     ver_read   = raw[2] if len(raw) > 2 else 0
                     if magic_read == MAGIC and ver_read == EXPECTED_VER:
-                        # Header matches v12 but entity decode is impossible
                         rec   = records[start]
                         epoch = struct.unpack_from("<I", raw, 4)[0] if len(raw) >= 8 else 0
                         score, reasons = score_candidate(rec, epoch, raw)
