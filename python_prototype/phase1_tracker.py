@@ -23,9 +23,17 @@ Tier 1 — inotify IN_OPEN on /proc/<own_pid>/mem  (_InotifyMemWatcher)
 
     Re-entrancy guard (_scanning Event):
     _find_foreign_mem_handles() opens /proc/*/fd entries while scanning,
-    which can itself trigger IN_OPEN on /proc/<pid>/mem.  A _scanning
-    flag on _InotifyMemWatcher prevents a second concurrent call to
-    _on_mem_open() from racing the first one.
+    which can itself trigger IN_OPEN on /proc/<pid>/mem.  Two interlocking
+    guards prevent this from corrupting detection:
+
+      1. _run() event loop: when IN_OPEN arrives while _scanning is set,
+         the debounce re-arm is suppressed entirely — the event is dropped
+         before it can touch _debounce_active or restart the timer.  This
+         is the primary guard that stops the 100ms detection-window push.
+
+      2. _fire_open(): if the debounce timer somehow fires while _scanning
+         is still set (belt-and-suspenders), the callback invocation is
+         dropped and debounce state is reset cleanly.
 
     When the outward /proc/*/fd scan finds nothing (reader is root, we are
     not), the open is logged as SUSPECT(anonymous-open) with a 1 s rate
@@ -312,11 +320,15 @@ def _find_foreign_mem_handles(
     any_permission_denied: True if at least one /proc/<pid>/fd was unreadable
                           (indicates a higher-privilege process exists that we
                            cannot inspect — treat inotify event as anonymous-open)
+
+    Self-open suppression: own_pid is always skipped so that the scan
+    itself (which opens /proc/*/fd symlinks and can re-trigger IN_OPEN on
+    /proc/<own_pid>/mem) never appears as a false-positive hit.
     """
     results: List[Tuple[int, List[str]]] = []
     any_eperm = False
     for pid in _all_pids():
-        if pid == own_pid:
+        if pid == own_pid:          # never report ourselves
             continue
         fd_dir = f"/proc/{pid}/fd"
         try:
@@ -718,13 +730,20 @@ class _InotifyMemWatcher:
     rapid-fire events into one callback per burst.  The gate resets on
     IN_CLOSE so a genuine re-open after close is never suppressed.
 
-    Re-entrancy guard
-    -----------------
-    _find_foreign_mem_handles() opens /proc/*/fd entries while scanning,
-    which can itself re-trigger IN_OPEN on /proc/<pid>/mem.  The
-    _scanning Event is set for the duration of the callback and cleared
-    immediately after.  A second IN_OPEN that fires while _scanning is
-    set is silently dropped — the first callback is already handling it.
+    Re-entrancy guard — two interlocking layers
+    --------------------------------------------
+    Layer 1 (_run event loop):
+        When IN_OPEN arrives while _scanning is already set, the debounce
+        re-arm is suppressed at source — _debounce_active is NOT set and
+        no Timer is started.  The event is silently dropped.  This is the
+        primary fix for the 100 ms detection-window push: the scan's own
+        /proc/*/fd opens can no longer restart the debounce clock.
+
+    Layer 2 (_fire_open):
+        Belt-and-suspenders check.  If the Timer fires while _scanning is
+        still set (e.g. a very slow scan), the callback invocation is
+        dropped and debounce state is cleared cleanly.  This prevents a
+        second concurrent _on_open_cb() even if Layer 1 is somehow raced.
     """
 
     def __init__(self, mem_path: str, own_pid: int,
@@ -746,9 +765,9 @@ class _InotifyMemWatcher:
         self._debounce_timer: Optional[threading.Timer] = None
         self._debounce_lock    = threading.Lock()
 
-        # Re-entrancy guard: set while _on_open_cb is executing so that
-        # a re-triggered IN_OPEN from _find_foreign_mem_handles() does
-        # not spawn a second concurrent callback invocation.
+        # Re-entrancy guard: set for the duration of _on_open_cb execution.
+        # Layer 1: checked in _run() to suppress debounce re-arm.
+        # Layer 2: checked in _fire_open() to drop concurrent invocations.
         self._scanning = threading.Event()
 
     def start(self) -> bool:
@@ -783,14 +802,15 @@ class _InotifyMemWatcher:
     def _fire_open(self) -> None:
         """Called once per debounced burst — invokes the open callback.
 
-        Re-entrancy guard: if a previous _fire_open() invocation is still
-        running (e.g. its _find_foreign_mem_handles scan re-triggered
-        IN_OPEN which rescheduled the debounce timer), we drop this
-        redundant call entirely — the in-flight call will handle it.
+        Layer 2 re-entrancy guard: if _scanning is still set when this
+        timer fires, the callback invocation is dropped and debounce state
+        is reset cleanly.  The primary protection is Layer 1 in _run()
+        which prevents the re-entrant IN_OPEN from ever re-arming the
+        timer; this check is the belt-and-suspenders fallback.
         """
         if self._scanning.is_set():
-            # Another _on_open_cb is already in-flight; this event was
-            # caused by that scan opening /proc/*/fd entries.  Drop it.
+            # Belt-and-suspenders: the in-flight scan's fd opens triggered
+            # a re-arming that Layer 1 should have blocked.  Drop cleanly.
             with self._debounce_lock:
                 self._debounce_active = False
                 self._debounce_timer  = None
@@ -823,6 +843,19 @@ class _InotifyMemWatcher:
                 offset += _INOTIFY_EVENT_SIZE + name_len
 
                 if mask & _IN_OPEN:
+                    # -------------------------------------------------------
+                    # Layer 1 re-entrancy guard (Fix 2):
+                    # If _scanning is set, _on_mem_open() is currently
+                    # executing its _find_foreign_mem_handles() scan.  That
+                    # scan opens /proc/*/fd symlinks and can re-trigger this
+                    # very IN_OPEN event.  Suppress the debounce re-arm
+                    # entirely so the scan cannot push the detection window
+                    # out by another _OPEN_DEBOUNCE_S seconds.
+                    # -------------------------------------------------------
+                    if self._scanning.is_set():
+                        # Drop — this event was caused by our own scan.
+                        continue
+
                     with self._debounce_lock:
                         if not self._debounce_active:
                             self._debounce_active = True
@@ -1133,8 +1166,10 @@ class ObserverHunter:
 
         Re-entrancy note: _InotifyMemWatcher._fire_open() sets its
         _scanning Event before calling this method and clears it after.
-        A second concurrent call is dropped at the _fire_open() level,
-        so we never execute this method twice simultaneously.
+        A second concurrent call is dropped at the _fire_open() level
+        (Layer 2), and the re-entrant IN_OPEN from the fd scan is
+        suppressed in _run() before it can re-arm the debounce timer
+        (Layer 1).
         """
         hits, any_eperm = _find_foreign_mem_handles(self._own_pid, self._mem_target)
 
